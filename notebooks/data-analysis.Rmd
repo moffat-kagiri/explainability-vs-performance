@@ -16,7 +16,6 @@ install.packages(
     repos = NULL
 )
 
-
 require(MASS)
 library(CASdatasets)
 ?CASdatasets
