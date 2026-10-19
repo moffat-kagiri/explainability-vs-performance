@@ -4,31 +4,96 @@ author: "Moffat Kagiri Ngugi"
 date: "`r Sys.Date()`"
 output: word_document
 ---
+## Chapter 3: Methodology
+
+The last chapter posits that SHAP sensitivity is a reliable marker of model risk in predictive models used for pricing. The methodology described here translates this hypothesis into empirical research to examine whether the variation of SHAP sensitivity across model classes can facilitate the assessment of model risks in actuarial contexts. This chapter also examines how explanation fidelity varies with the predictive performance of GLMs, GBMs, and ANNs, and from this, synthesizes a multi-criteria decision framework to operationalise model selection under the actuarial constraints discussed in the literature review. The empirical research is carried out with the French Motor Third Party Liability dataset available from CASdatasets.
+
+### Research Design
+
+Mann (2003) discusses the 3 approaches typically used in actuarial research: cross section, cohort, and case control. This study retains actuarial judgement as Mann prescribes and approaches the research problem using a quantitative comparative empirical study. It carries out a controlled experimental comparison that evaluates three model classes on the same criteria. It is structured to run the models on the same dataset, provide the same test/train splits, and evaluate them on the same metrics. This ensures that any differences that arise in the explanation fidelity or predictive accuracy are attributed to the choice of model class and not the evaluation or data variation. This way, this empirical design facilitates the creation of a multi-criteria framework that aids model choice decisions by actuaries. 
+
+### Dataset
+
+Luteijn et al. (2025) provides a point of reference for research methods and risks to mitigate in actuarial research, particularly regarding the dataset to be used or sampled. They recommend using the FAIR principles and point out some potential pitfalls to look out for. FAIR stands for findable, accessible, interoperable, and reproducible, the standards of data integrity and reproducibility to enforce. Following these principles ensures that the findings of actuarial research are reliable and stable and that under similar conditions, the analyses carried out can be replicated and produce similar findings(Wilkinson et al., 2016).
+In line with FAIR, this study uses the French Motor Third-Party Claims dataset previously used by Noll et al. (2018). It is easily accessible through the CASdatasets R package published in 2015 as the companion package for the Computational Actuarial Science with R textbook. Noll et al., serves as a precedent to guide the study in terms of any preprocessing requirements, and to validate the structure and dispersion of the data, as an addition to the dataset’s metadata. The data pack consists of 677,991 rows of third party liability covers observed between 2011 and 2013. It has 12 variables that detail the claim frequency component of third-party policies in an anonymous French insurer, including policy unique identifiers, exposures, area/location variables, drivers’ age, bonus-malus level, and vehicle specifications. 
+
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
-#http://dutangc.free.fr/pub/RRepos/
-install.packages('xts')
-
-install.packages(
-    "C:/Users/moffat.ngugi/Downloads/CASdatasets_1.2-1.tar.gz",
-    repos = NULL
-)
-
 require(MASS)
-library(CASdatasets)
+require(tidyverse)
+
+# Import the dataset
+require(CASdatasets)
 ?CASdatasets
  
 data(freMTPL2freq)
-str(freMTPL2freq)
+``` 
+
+To prepare this dataset for the comparative analysis, it is pre-processed. Luteijn et al. (2025) addresses the issue of missing data using the approach used in clinical research, classifying missing data as missing completely at random (MCAR), missing at random (MAR), and missing not at random (MNAR). These categories imply varied reasons for missing data and, therefore, require different approaches in resolving. Fortunately, the check for missing values returns 0 for all columns, which enables us to proceed with the entire dataset. Although the dataset has been reviewed after Noll et. al. reducing its size from 678,013, it still contains policies that are erroneously assigned exposures, with 1,224 policies having exposures that exceed 1 as shown below, making 0.18% of the entire dataset. To correct this error, the study caps the exposures at 1. Noll et. al. also clean the data with regard to the claim frequency, capping the number of claims made on any policy at 4. However, this study challenges the concept of extreme claim counts made because as far as there is no contractual limit to the number of claims a given client can make, it would be misleading to omit these data from the pricing algorithm. Omitting these extreme cases censors the right tail of the actual distribution and greatly underestimates the liability of high risk drivers. As such, the study only validates the significance of these outliers in number and proportion and leaves them in the dataset to be split into the training and test splits, as only 8 policies have more than 4 claims for the entire period making up only 0.001% of it. 
+The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In freMTPL2freq, this variable has a maximum of 230. Considering the use of a Poisson or Gamma log-link function for GLMs, and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes BonusMalus (He et.al.). Another deviation from the approach in Noll et. al. is the use of the driver's age as an integer rather than a categorical variable. According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few, as the binning approach does, risks losing critical variations in the portfolio's risk profile. 
+
+
+```{r, include=TRUE, echo=TRUE}
+# EDA
+## Data shape
+
+glimpse(freMTPL2freq)
+
+## Missing Values
+
+freMTPL2freq %>%
+  summarise(across(everything(), ~sum(is.na(.))))
+
+## Error checks and management
+
+### 1. Exposures EDA and cap at 1
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_1 = sum(Exposure>1, na.rm = TRUE),
+    pct_exceeding_1 = mean(Exposure>1, na.rm = TRUE)*100
+  )
+
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(Exposure = pmin(Exposure, 1, na.rm = FALSE))
+
+sum(freMTPL2freq$Exposure>1, na.rm = TRUE)
+
+### 2. Claim Frequency EDA
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_4 = sum(ClaimNb>4, na.rm = TRUE),
+    pct_exceeding_4 = mean(ClaimNb>4, na.rm = TRUE)*100
+  )
+### 3. BonusMalus EDA and cap at 99.9th percentile
+summary(freMTPL2freq$BonusMalus)
+cap_threshold <- quantile(freMTPL2freq$BonusMalus, 0.999, na.rm = TRUE)
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(
+    # Cap
+    BonusMalus = pmin(BonusMalus, cap_threshold, na.rm = TRUE),
+    
+    # Convert to multiplicative factor
+    BonusMalus = BonusMalus/100
+  )
+
+freMTPL2freq %>%
+  summarise(
+    min_BonusMalus = min(BonusMalus),
+    mean_BonusMalus = mean(BonusMalus),
+    max_BonusMalus = max(BonusMalus)
+  )
+
+## Empirical Loss Ratio
+
+
 ```
 
-## R Markdown
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
-
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
 ```{r cars}
 summary(cars)
