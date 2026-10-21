@@ -124,7 +124,8 @@ freMTPL2freq <- freMTPL2freq %>%
   mutate(
     DrivAgeBin = cut(DrivAge, 
                      breaks = c(17, 21, 26, 31, 41, 51, 71,100), 
-                     labels=c("18-20", "21-25", "26-30", "31-40", "41-50", "51-70", "70+")
+                     labels=c("18-20", "21-25", "26-30", "31-40", 
+                              "41-50", "51-70", "70+")
                      ),
     VehAgeBin = cut(VehAge,
                     breaks = c(-1, 1, 3, 5, 10, 100),
@@ -372,9 +373,17 @@ test <- test %>% select(-HasClaim)
 Having established the shape and distribution of claim occurrences in the dataset, the study trained a GLM, a GBM, and an ANN to make pricing algorithm for the purpose of examining the explainability-performance frontier in insurance pricing. 
 
 #### Generalized Linear Model
-The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the assymetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that the 
+The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the assymetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that mathematically, the sufficient statistics match the expected values and that it is easy to determine the standard errors or confidence intervals. 
+Some features in freMTPL2freq require some changes for better predictive performance in the GLM. These include $DrivAge$, $VehAge$, and $Density$. As previously mentioned, driver age and vehicle age have nonlinear relationships with insurance risk. At a young age, typically between 18 and 25, the risk of accidents rises sharply, as does the severity of claims. Insurance risk, tracked by these two features, drops steadily through the mid to late twenties, settling into a minimal level in the middle age from 30 through to 60, then rises again towards and past the 70s. For this reason, the feature was binned, capturing ages 18-20 and 21-25, showing the increase in claims, and the stabilizing around 26-30, 31-40, and 41-50, and the subsequent increase in 51-70, 70+. Similarly, the vehicle age starts rising sharply on the left side, and forms a plateau at around 18 years. As such, linear terms would not sufficiently capture these nonlinear interactions. Similarly, the population density feature $Density$ is log-transformed to linearise its multiplicative interaction with insurance risk. This makes it easy to fit with a GLM, and reduces the effect of outliers in the feature. The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage. While the GLM is backed by a sound mathematical foundation on the suitability of a Poisson GLM with a log link function, the choices discussed here are made quite arbitrarily and there is  literature backing alternative approaches. As such, these choices carry the illusion of arbitrariness discussed in chapter 2. 
+The sprcification of the GLM is, therefore, as shown below: 
 
+```{r, include=TRUE, echo = FALSE}
+
+
+```
 
 ### Evaluation Framework
+
+
 
 
