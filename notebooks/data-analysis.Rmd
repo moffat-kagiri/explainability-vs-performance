@@ -2,7 +2,7 @@
 title: "Model Comparison"
 author: "Moffat Kagiri Ngugi"
 date: "`r Sys.Date()`"
-output: word_document
+output: html_document
 ---
 ## Chapter 3: Methodology
 
@@ -14,18 +14,21 @@ Mann (2003) discusses the 3 approaches typically used in actuarial research: cro
 
 ### Dataset
 
-Luteijn et al. (2025) provides a point of reference for research methods and risks to mitigate in actuarial research, particularly regarding the dataset to be used or sampled. They recommend using the FAIR principles and point out some potential pitfalls to look out for. FAIR stands for findable, accessible, interoperable, and reproducible, the standards of data integrity and reproducibility to enforce. Following these principles ensures that the findings of actuarial research are reliable and stable and that under similar conditions, the analyses carried out can be replicated and produce similar findings(Wilkinson et al., 2016).
+Luteijn et al. (2025) provides a point of reference for research methods and risks to mitigate in actuarial research, particularly regarding the dataset to be used or sampled. They recommend using the FAIR principles and point out some potential pitfalls to look out for. FAIR stands for find-able, accessible, interoperable, and reproducible, the standards of data integrity and reproducibility to enforce. Following these principles ensures that the findings of actuarial research are reliable and stable and that under similar conditions, the analyses carried out can be replicated and produce similar findings(Wilkinson et al., 2016).
 
 ```{r setup, include=TRUE, echo=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 require(MASS)
 require(tidyverse)
 require(dplyr)
+require(ggplot2)
+require(gridExtra)
 require(patchwork)
 require(sf)
 require(rnaturalearth)
 require(rnaturalearthhires)
 require(stringi)
+require(plotly)
 
 # Import the dataset
 require(CASdatasets)
@@ -131,7 +134,60 @@ freMTPL2freq <- freMTPL2freq %>%
   )
 ```
 
-The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In freMTPL2freq, this variable has a maximum of 230. Considering the use of a Poisson or Gamma log-link function for GLMs, and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes BonusMalus (He et.al.). According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few risks losing critical variations in the portfolio's risk profile. As such, the study handles driver age and vehicle age with care, creating new columns with these features binned at appropriate levels to prevent underfitting them in the GLM. It also maintains the existing continuous variables for use with the GBM and ANN which can detect the nonlinearity they demonstrate. 
+The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In $freMTPL2freq$, this variable has a maximum of 230. Considering the use of a Poisson or Gamma log-link function for GLMs, and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes $BonusMalus$ (He et.al.). 
+
+```{r, include=TRUE, echo = FALSE}
+## Plot: Vehicle age and driver age without binning, show why binning is necessary
+
+driver_rate <- freMTPL2freq %>%
+  group_by(DrivAge) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_rate = total_claims / total_exposure,
+    .groups = "drop"
+  )
+
+vehicle_rate <- freMTPL2freq %>%
+  group_by(VehAge) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_rate = total_claims / total_exposure,
+    .groups = "drop"
+  )
+
+plot_driver <- ggplot(driver_rate, aes(x = DrivAge, y = claim_rate)) +
+  geom_line(color = "#0284c7", size = 1) +
+  labs(
+    title = "Claim Frequency by Driver Age",
+    x = "Driver Age (DrivAge)",
+    y = "Claim Rate (Claims / Exposure)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(color = "#0369a1", face = "bold"),
+    axis.title = element_text(color = "#475569")
+  )
+
+plot_vehicle <- ggplot(vehicle_rate, aes(x = VehAge, y = claim_rate)) +
+  geom_line(color = "#38bdf8", size = 1) +
+  labs(
+    title = "Claim Frequency by Vehicle Age",
+    x = "Vehicle Age (VehAge)",
+    y = "Claim Rate (Claims / Exposure)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(color = "#0369a1", face = "bold"),
+    axis.title = element_text(color = "#475569")
+  )
+
+#Render side-by-side
+grid.arrange(plot_driver, plot_vehicle, ncol = 2)
+```
+
+According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few risks losing critical variations in the portfolio's risk profile. As such, the first instinct was to model these features as continuous variables for optimal learning. However, the distribution of claim frequency with age creates a u-shaped curve and would lead to underfitting in GLMs. As such, $DrivAge$ and $VehAge$ are binned at appropriate levels for modeling with the GLM. This is done with new variables $DrivAgeBin$ and $VehAgeBin$ , while the initial features are maintained as continuous variables for use with the GBM and ANN. These  which can detect the non-linearity they demonstrate.
 
 ```{r, include=TRUE, echo = FALSE}
 # Background Aggregation
@@ -150,28 +206,6 @@ driv_age <- freMTPL2freq %>%
 bon_mal <- freMTPL2freq %>%
   group_by(BonusMalus = round(BonusMalus, 2)) %>%
   summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
-
-### Regional Claim counts (map)
-region_bridge <- c(
-  "alsace" = "grand est", "champagne-ardenne" = "grand est", "lorraine" = "grand est",
-  "aquitaine" = "nouvelle-aquitaine", "limousin" = "nouvelle-aquitaine", 
-  "poitou-charentes" = "nouvelle-aquitaine", "auvergne" = "auvergne-rhone-alpes",
-  "rhone-alpes" = "auvergne-rhone-alpes", "bourgogne" = "bourgogne-franche-comte",
-  "franche-comte" = "bourgogne-franche-comte","bretagne" = "bretagne",
-  "centre" = "centre-val de loire", "corse" = "corse", 
-  "ile-de-france" = "ile-de-france", "languedoc-roussillon" = "occitanie",
-  "midi-pyrenees" = "occitanie", "nord-pas-de-calais" = "hauts-de-france", 
-  "picardie" = "hauts-de-france", "basse-normandie" = "normandie", 
-  "haute-normandie" = "normandie", "pays-de-the-loire" = "pays de la loire",
-  "pays-de-la-loire" = "pays de la loire", 
-  "provence-alpes-cote-d'azur" = "provence-alpes-cote d'azur"
-  )
-
-region_claims <- freMTPL2freq%>% 
-  mutate(clean_region = tolower(trimws(Region))) %>%
-  mutate(modern_region = recode(clean_region, !!!region_bridge))%>%
-  group_by(Region = modern_region) %>%
-  summarise(total_claims = sum(ClaimNb, na.rm = TRUE), .groups = "drop") 
 
 #Visualization
 ## Plot 1: Vehicle Age 
@@ -202,43 +236,143 @@ p3 <- ggplot(bon_mal, aes(x=BonusMalus, y=freq)) +
 
 ```
 
-Further exploratory analysis freMTPL2freq is required to ascertain the suitability of Poisson as a log-link function and indicate if any of the main driving features identified by Noll et.al. are overdispersed. Exposure proves to be a critical aspect to handle carefully as it is not a feature, but an offset or normalizing weight. In essence, two policies with exposures of 0.3 and 0.8 but with 2 claims each represent vastly different claim rates. As such, it is critical to handle it differently. The graphs plotted above show how the exposure-adjusted claim rate varied against the features identified as most significant by Noll et. al., that is, the vehicle age, driver age, and bonus/malus. The map below demonstrates the dispersion of claims across different regions. 
+Further exploratory analysis $freMTPL2freq$ is required to ascertain the suitability of Poisson as a log-link function and indicate if any of the main driving features identified by Noll et.al. are overdispersed. Exposure proves to be a critical aspect to handle carefully as it is not a feature, but an offset or normalizing weight. In essence, two policies with exposures of 0.3 and 0.8 but with 2 claims each represent vastly different claim rates. As such, it is critical to handle it differently. The graphs plotted above show how the exposure-adjusted claim rate varied against the features identified as most significant by Noll et. al., that is, the vehicle age, driver age, and bonus/malus. The map below demonstrates the dispersion of claims across different regions. 
 
 ```{r, include=TRUE, echo = FALSE}
-# Download boundary vectors
-maps <- ne_states(country = "france", returnclass = "sf") %>%
+# Download department-level boundary vectors
+france_departments <- ne_states(country = "france", returnclass = "sf") %>%
+  #Remove overseas territories
   filter(!name %in% c("Guyane française", "Guadeloupe", "Martinique", 
-                      "Mayotte", "La Réunion")) %>%
-  mutate(map_name = tolower(trimws(name)))
+                      "Mayotte", "La Réunion"))%>%
+  # mutate(dept_code = substr(gn_a1_code, 3, 4)) (breaks the extraction for 
+  # continental departments based on their prefixes)
+  mutate(dept_code = stringr::str_replace(gn_a1_code, "^FR\\.", ""))
+
+# Dissolve department geometries into the historic regions
+# Departments into pre 2016 regions
+historic_bridge <- tibble(
+  dept_code = c(
+    "01", "07", "26", "38", "42", "69", "73", "74", # Rhône-Alpes
+    "03", "15", "43", "63",                         # Auvergne
+    "02", "60", "80",                               # Picardie
+    "59", "62",                                     # Nord-Pas-de-Calais
+    "24", "33", "40", "47", "64",                   # Aquitaine
+    "19", "23", "87",                               # Limousin
+    "16", "17", "79", "86",                         # Poitou-Charentes
+    "14", "50", "61",                               # Basse-Normandie
+    "27", "76",                                     # Haute-Normandie
+    "21", "58", "71", "89",                         # Bourgogne
+    "25", "39", "70", "90",                         # Franche-Comté
+    "11", "30", "34", "48", "66",                   # Languedoc-Roussillon
+    "09", "12", "31", "32", "46", "65", "81", "82", # Midi-Pyrénées
+    "67", "68",                                     # Alsace
+    "08", "10", "51", "52",                         # Champagne-Ardenne
+    "54", "55", "57", "88",                         # Lorraine
+    "22", "29", "35", "56",                         # Bretagne (Unchanged)
+    "18", "28", "36", "37", "41", "45",             # Centre
+    "75", "77", "78", "91", "92", "93", "94", "95", # Île-de-France (Unchanged)
+    "44", "49", "53", "72", "85",                   # Pays de la Loire (Unchanged)
+    "04", "05", "06", "13", "83", "84",             # Provence-Alpes-Côte d'Azur (Unchanged)
+    "2A", "2B",                                     # Corse (Unchanged)
+    "22", "29", "35", "56"                          # Fr-m (Double check template mapping codes)
+  ),
+  Historic_Region = c(
+    rep("Rhone-Alpes", 8), rep("Auvergne", 4), rep("Picardie", 3), rep("Nord-Pas-de-Calais", 2),
+    rep("Aquitaine", 5), rep("Limousin", 3), rep("Poitou-Charentes", 4), rep("Basse-Normandie", 3),
+    rep("Haute-Normandie", 2), rep("Bourgogne", 4), rep("Franche-Comté", 4), 
+    rep("Languedoc-Roussillon", 5), rep("Midi-Pyrénées", 8), rep("Alsace", 2),
+    rep("Champagne-Ardenne", 4), rep("Lorraine", 4), rep("Bretagne", 4), rep("Centre", 6),
+    rep("Île-de-France", 8), rep("Pays de la Loire", 5),
+    rep("Provence-Alpes-Côte d'Azur", 6), rep("Corse", 2), rep("Bretagne", 4)
+  )
+)
+
+france_departments <- france_departments %>%
+  mutate(dept_code = case_when(
+    name =="Corse-du-Sud" ~ "2A",
+    name =="Haute-Corse" ~ "2B",
+    TRUE ~ dept_code
+  ))
+
+historic_regions_map <- france_departments%>%
+  left_join(historic_bridge, by = "dept_code") %>%
+  filter(!is.na(Historic_Region))%>%
+  group_by(Historic_Region)%>%
+  summarise(geometry = st_union(geometry), .groups = "drop")%>%
+  mutate(clean_map_region = tolower(trimws(Historic_Region)))%>%
+  mutate(clean_map_region = iconv(clean_map_region, to = "ASCII//TRANSLIT"))%>%
+  # Patch for dropped hyphens
+  mutate(clean_map_region = case_when(
+    str_detect(clean_map_region, "provence") ~ "provence-alpes-cotes-d'azur",
+    str_detect(clean_map_region, "loire") ~ "pays-de-la-loire",
+    TRUE ~ clean_map_region
+  ))
+
+# Background data aggregation 
+region_claims <- freMTPL2freq%>%
+  group_by(Region) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_frequency = total_claims/total_exposure,
+    .groups = "drop"
+  ) %>%
+  #Standardize region names
+  mutate(clean_data_region = tolower(trimws(Region)))%>%
+  mutate(clean_data_region = iconv(clean_data_region, to = "ASCII//TRANSLIT"))
 
 # Attach raw total claims onto geometry nodes
-mapdata <- maps %>%
-  left_join(region_claims, by = c("map_name" = "Region"))
+mapdata <- historic_regions_map %>%
+  left_join(region_claims, by = c("clean_map_region" = "clean_data_region"))
+
+# Render total claims
+#ggplot(data = mapdata) + 
+# geom_sf(aes(fill = total_claims), color = "white", size = 0.2) +
+#  scale_fill_gradient(low = "#E0F7FA", high = "#0288D1", name = "Total Claim Count",
+#                      labels = scales::label_comma(), na.value = "#ECEFF1") +
+#  theme_void() + 
+#  theme(
+#    plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+#    legend.position = "right"
+#  ) +
+# labs(title = "Geographic Heatmap: Distribution of Total Claims by Region")
 
 # Render
 ggplot(data = mapdata) + 
-  geom_sf(aes(fill = total_claims), color = "white", size = 0.2) +
-  scale_fill_gradient(low = "#E0F7FA", high = "#0091EA", name = "Total Claim Count",
+ geom_sf(aes(fill = claim_frequency), color = "white", size = 0.2) +
+  scale_fill_gradient(low = "#E0F7FA", high = "#0288D1", name = "Claim Frequency per Region",
                       labels = scales::label_comma(), na.value = "#ECEFF1") +
   theme_void() + 
   theme(
     plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
     legend.position = "right"
   ) +
-  labs(title = "Geographic Heatmap: Distribution of Total Claims by Region")
-
+ labs(title = "Geographic Heatmap: Claim Frequency by Region") +
+  geom_sf_text(aes(label = Region), size = 2, color = "black", check_overlap = TRUE)
 ```
-
-The final step in preprocessing the dataset is to split it into a training dataset and a test dataset to enable the validation of the representation learning that takes place when modelling claim frequency as an indicator of insurance risk. For sufficient learning, the study follows the jusdgement in Noll et. al. in having a large portion of the dataset in the training dataset, and a smaller portion for testing, with a 90-10 ratio. A fair measure of the predictive accuracy needs to cover all levels of risk. In the case of this analysis, the majority of policies have no claims for the year they were observed in. As such, a simple random split may end up having a disproportionate amount of zeros to actual claim counts. To prevent this, it would be ideal to have a reasonably balanced loss ratio in both the training and test datasets, which can be achieved with a stratified split by claim occurrence. This is achieved below by starting with a binary indicator (HasClaim) which tells whether a policy has a claim or not.
+For further assessment, the study mapped the claim frequency as shown above. As the map demonstrates, the widely varying exposure-adjusted claim frequency alludes to the significance of the region of residence in determining the insurance risk in a given policy. 
+The final step in preprocessing the dataset is to split it into a training dataset and a test dataset to enable the validation of the representation learning that takes place when modelling claim frequency as an indicator of insurance risk. For sufficient learning, the study follows the judgement in Noll et. al. in having a large portion of the dataset in the training dataset, and a smaller portion for testing, with a 90-10 ratio. As such, this split provides 610,191 policies in the training portion and leaves 67,800 for the test data. A fair measure of the predictive accuracy needs to cover all levels of risk. In the case of this analysis, the majority of policies have no claims for the year they were observed in. As such, a simple random split may end up having a disproportionate amount of zeros to actual claim counts. To prevent this, it would be ideal to have a balanced amount of policies with claims in both the training and test datasets, which can be achieved with a stratified split by claim occurrence. This is achieved below by starting with a binary indicator ($HasClaim$) which tells whether a policy has a claim or not. As a result, this split ensures that the performance comparison is meaningful and not noisy, as the differences in the models are reliably attributed to their approaches and not artifacts in the data. 
 ```{r, include=TRUE, echo = FALSE}
 require(rsample)
 
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(HasClaim = factor(ifelse(ClaimNb> 0, 1, 0)))
+
+split <- initial_split(freMTPL2freq, prop = 0.9, strata = HasClaim)
+train <- training(split)
+test <- testing(split)
+
+# Remove the helper column
+train <- train%>% select(-HasClaim)
+test <- test %>% select(-HasClaim)
+
 ```
 
-
-
 ### Model Specifications
+Having established the shape and distribution of claim occurrences in the dataset, the study trained a GLM, a GBM, and an ANN to make pricing algorithm for the purpose of examining the explainability-performance frontier in insurance pricing. 
 
+#### Generalized Linear Model
+The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the assymetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that the 
 
 
 ### Evaluation Framework
