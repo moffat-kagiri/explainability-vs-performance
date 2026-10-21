@@ -1,0 +1,219 @@
+---
+title: "Model Comparison"
+author: "Moffat Kagiri Ngugi"
+date: "`r Sys.Date()`"
+output: word_document
+---
+## Chapter 3: Methodology
+
+The last chapter posits that SHAP sensitivity is a reliable marker of model risk in predictive models used for pricing. The methodology described here translates this hypothesis into empirical research to examine whether the variation of SHAP sensitivity across model classes can facilitate the assessment of model risks in actuarial contexts. This chapter also examines how explanation fidelity varies with the predictive performance of GLMs, GBMs, and ANNs, and from this, synthesizes a multi-criteria decision framework to operationalise model selection under the actuarial constraints discussed in the literature review. The empirical research is carried out with the French Motor Third Party Liability dataset available from CASdatasets.
+
+### Research Design
+
+Mann (2003) discusses the 3 approaches typically used in actuarial research: cross section, cohort, and case control. This study retains actuarial judgement as Mann prescribes and approaches the research problem using a quantitative comparative empirical study. It carries out a controlled experimental comparison that evaluates three model classes on the same criteria. It is structured to run the models on the same dataset, provide the same test/train splits, and evaluate them on the same metrics. This ensures that any differences that arise in the explanation fidelity or predictive accuracy are attributed to the choice of model class and not the evaluation or data variation. This way, this empirical design facilitates the creation of a multi-criteria framework that aids model choice decisions by actuaries. 
+
+### Dataset
+
+Luteijn et al. (2025) provides a point of reference for research methods and risks to mitigate in actuarial research, particularly regarding the dataset to be used or sampled. They recommend using the FAIR principles and point out some potential pitfalls to look out for. FAIR stands for findable, accessible, interoperable, and reproducible, the standards of data integrity and reproducibility to enforce. Following these principles ensures that the findings of actuarial research are reliable and stable and that under similar conditions, the analyses carried out can be replicated and produce similar findings(Wilkinson et al., 2016).
+
+```{r setup, include=TRUE, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(MASS)
+require(tidyverse)
+require(dplyr)
+require(patchwork)
+require(sf)
+require(rnaturalearth)
+
+# Import the dataset
+require(CASdatasets)
+?CASdatasets
+ 
+data(freMTPL2freq)
+
+#preview  
+glimpse(freMTPL2freq)
+
+## Missing Values
+freMTPL2freq %>%
+  summarise(across(everything(), ~sum(is.na(.))))
+```
+
+In line with FAIR, this study uses the French Motor Third-Party Claims dataset previously used by Noll et al. (2018). It is easily accessible through the CASdatasets R package published in 2015 as the companion package for the Computational Actuarial Science with R textbook. Noll et al., serves as a precedent to guide the study in terms of any preprocessing requirements, and to validate the structure and dispersion of the data, as an addition to the dataset’s metadata. The data pack consists of 677,991 rows of third party liability covers observed between 2011 and 2013. It has 12 variables that detail the claim frequency component of third-party policies in an anonymous French insurer, including policy unique identifiers, exposures, area/location variables, drivers’ age, bonus-malus level, and vehicle specifications. 
+
+```{r, include=TRUE, echo=FALSE}
+## Data Cleaning and Feature Preprocessing
+
+### 1. Audit duplicates
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    duplicate_count = sum(duplicated(IDpol), na.rm = TRUE),
+    duplicate_pct = mean(duplicated(IDpol), na.rm = TRUE)*100
+  )
+
+### 2. Exposures preprocessing and cap at 1
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_1 = sum(Exposure>1, na.rm = TRUE),
+    pct_exceeding_1 = mean(Exposure>1, na.rm = TRUE)*100
+  )
+
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(Exposure = pmin(Exposure, 1, na.rm = FALSE))
+
+sum(freMTPL2freq$Exposure>1, na.rm = TRUE)
+
+### 3. Exposures less than 1 day
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    zero_exposure = sum(Exposure <= 0, na.rm = TRUE),
+    pct_zero_exposure = mean(Exposure <= 0, na.rm = TRUE)*100
+  )
+
+### 4. Remove unique identifiers
+IDpol <- freMTPL2freq$IDpol
+freMTPL2freq <- freMTPL2freq %>%
+  select(-IDpol)
+
+### 5. Claim Frequency Check
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_4 = sum(ClaimNb>4, na.rm = TRUE),
+    pct_exceeding_4 = mean(ClaimNb>4, na.rm = TRUE)*100
+  )
+``` 
+
+To prepare this dataset for the comparative analysis, it is pre-processed, starting with a check for missing values. The check for missing values returns 0 for all columns, which enables us to proceed with the entire dataset. Similarly, the study examines the presence of any duplicates in the dataset based on the policy unique identifier IDpol, and confirms that all policies are unique. Although the dataset has been reviewed after Noll et. al. reducing its size from 678,013, it still contains policies that are erroneously assigned exposures, with 1,224 policies having exposures that exceed 1 as shown above, making 0.18% of the entire dataset. To correct this error, the study caps the exposures at 1. The study then verifies that the data has no nil or negative exposures and confirms that it is suitable for analysis. After this,the policy identifier column is removed as it provides no information on the claim frequency and serves no purpose past this point. 
+Noll et. al. also clean the data with regard to the claim frequency, capping the number of claims made on any policy at 4. However, this study challenges the concept of extreme claim counts made because as far as there is no contractual limit to the number of claims a given client can make, it would be misleading to omit these data from the pricing algorithm. Omitting these extreme cases censors the right tail of the actual distribution and greatly underestimates the liability of high risk drivers. As such, the study only validates the significance of these outliers in number and proportion and leaves them in the dataset to be split into the training and test splits, as only 8 policies have more than 4 claims for the entire period making up only 0.001% of it. 
+
+```{r, include=TRUE, echo = FALSE}
+
+### 6. BonusMalus preprocessing and cap at 99.9th percentile
+summary(freMTPL2freq$BonusMalus)
+cap_threshold <- quantile(freMTPL2freq$BonusMalus, 0.999, na.rm = TRUE)
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(
+    # Cap
+    BonusMalus = pmin(BonusMalus, cap_threshold, na.rm = TRUE),
+    
+    # Convert to multiplicative factor
+    BonusMalus = BonusMalus/100
+  )
+
+freMTPL2freq %>%
+  summarise(
+    min_BonusMalus = min(BonusMalus),
+    mean_BonusMalus = mean(BonusMalus),
+    max_BonusMalus = max(BonusMalus)
+  )
+
+### 7. Binning DrivAge and VehAge, and log transform Density
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(
+    DrivAgeBin = cut(DrivAge, 
+                     breaks = c(17, 21, 26, 31, 41, 51, 71,100), 
+                     labels=c("18-20", "21-25", "26-30", "31-40", "41-50", "51-70", "70+")
+                     ),
+    VehAgeBin = cut(VehAge,
+                    breaks = c(-1, 1, 3, 5, 10, 100),
+                    labels = c("0-1", "2-3", "4-5", "6-10", "11+")
+                    ),
+    DensityLog = log(Density)
+  )
+```
+
+The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In freMTPL2freq, this variable has a maximum of 230. Considering the use of a Poisson or Gamma log-link function for GLMs, and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes BonusMalus (He et.al.). According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few risks losing critical variations in the portfolio's risk profile. As such, the study handles driver age and vehicle age with care, creating new columns with these features binned at appropriate levels to prevent underfitting them in the GLM. It also maintains the existing continuous variables for use with the GBM and ANN which can detect the nonlinearity they demonstrate. 
+
+```{r, include=TRUE, echo = FALSE}
+# Background Aggregation
+
+### Vehicle age summary (binned)
+veh_age <- freMTPL2freq %>%
+  group_by(VehAgeBin) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+### Driver age summary (binned)
+driv_age <- freMTPL2freq %>%
+  group_by(DrivAgeBin) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+### Bonus/Malus summary (continuous) 
+bon_mal <- freMTPL2freq %>%
+  group_by(BonusMalus = round(BonusMalus, 2)) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+### Regional Claim counts (map)
+region_claims <- freMTPL2freq%>% 
+  group_by(Region) %>%
+  summarise(total_claims = sum(ClaimNb), .groups = "drop")
+
+#Visualization
+## Plot 1: Vehicle Age 
+p1 <- ggplot(veh_age, aes(x = VehAgeBin, y = freq)) + 
+  geom_col(fill = "#87CEEB", color = "#4A7A96", width = 0.6) + 
+  theme_minimal() + labs(title = "Vehicle Age Profile", 
+                         x = "Binned Vehicle Age",
+                         y = "Claim Frequency")
+
+## Plot 2: Driver Age 
+p2 <- ggplot(driv_age, aes(x = DrivAgeBin, y = freq)) + 
+  geom_col(fill = "#87CEEB", color = "#4A7A96", width = 0.6) + 
+  theme_minimal() + 
+  labs(title = "Driver Age Profile", x = "Binned Driver Age", y = "Claim Frequency")
+
+## Plot 3: Bonus Malus Risk Curve
+p3 <- ggplot(bon_mal, aes(x=BonusMalus, y=freq)) +
+  geom_line(color = "#87CEEB", size = 1.2) +
+  geom_point(color = "#4A7A96", size = 1.5) + 
+  theme_minimal() +
+  labs(title = "Bonus/Malus Risk Curve",x = "Rescaled Bonus Malus", 
+       y = "Claim Frequency")
+
+## Combine 3 plots into 1 grid
+(p1+p2)/(p3+plot_spacer()) + 
+  plot_annotation(title = "Exploratory Data Analysis: Claim Frequency Drivers", 
+                  theme = theme(plot.title = element_text(face = "bold", size = 14)))
+
+```
+
+Further exploratory analysis freMTPL2freq is required to ascertain the suitability of Poisson as a log-link function and indicate if any of the main driving features identified by Noll et.al. are overdispersed. Exposure proves to be a critical aspect to handle carefully as it is not a feature, but an offset or normalizing weight. In essence, two policies with exposures of 0.3 and 0.8 but with 2 claims each represent vastly different claim rates. As such, it is critical to handle it differently. The graphs plotted above show how the exposure-adjusted claim rate varied against the features identified as most significant by Noll et. al., that is, the vehicle age, driver age, and bonus/malus. The map below demonstrates the dispersion of claims across different regions. 
+
+```{r, include=TRUE, echo = FALSE}
+# Download boundary vectors
+maps <- ne_states(country = "france", returnclass = "sf") %>%
+  mutate(Region_Code = paste0("R", code_target))
+
+# Attach raw total claims onto geometry nodes
+mapdata <- maps %>%
+  left_join(region_claims, by = c("Region_Code" = "Region"))
+
+# Render
+ggplot(data = mapdata) + 
+  geom_sf(aes(fill = total_claims), color = "white", size = 0.2) +
+  scale_fill_gradient(low = "#E0F7FA", high = "#0091EA", name = "Total Claim Count") +
+  theme_void() + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+    legend.position = "right"
+  ) +
+  labs(title = "Geographic Heatmap: Distribution of Total Claims by Region")
+
+```
+
+The final step p
+
+### Model Specifications
+
+
+
+### Evaluation Framework
+
+
+
