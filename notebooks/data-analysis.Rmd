@@ -105,7 +105,10 @@ cap_threshold <- quantile(freMTPL2freq$BonusMalus, 0.999, na.rm = TRUE)
 freMTPL2freq <- freMTPL2freq %>%
   mutate(
     # Cap
-    BonusMalus = pmin(BonusMalus, cap_threshold, na.rm = TRUE),
+    BonusMalus = pmin(BonusMalus, cap_threshold, na.rm = TRUE),    
+    
+    # Log Transform
+    BonusMalusLog = log(BonusMalus),
     
     # Convert to multiplicative factor
     BonusMalus = BonusMalus/100
@@ -135,7 +138,7 @@ freMTPL2freq <- freMTPL2freq %>%
   )
 ```
 
-The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In $freMTPL2freq$, this variable has a maximum of 230. Considering the use of a Poisson or Gamma log-link function for GLMs, and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes $BonusMalus$ (He et.al.). 
+The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history. In $freMTPL2freq$, this variable has a maximum of 230. Considering the learning approach in GLMs and the feature representation in GBMs and ANNs, it is appropriate to rescale this variable to have a neutral baseline of 1 rather than 100. In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes $BonusMalus$, capping it at the 99.9th percentile and then log-transforms it (He et.al.). 
 
 ```{r, include=TRUE, echo = FALSE}
 ## Plot: Vehicle age and driver age without binning, show why binning is necessary
@@ -373,12 +376,97 @@ test <- test %>% select(-HasClaim)
 Having established the shape and distribution of claim occurrences in the dataset, the study trained a GLM, a GBM, and an ANN to make pricing algorithm for the purpose of examining the explainability-performance frontier in insurance pricing. 
 
 #### Generalized Linear Model
-The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the assymetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that mathematically, the sufficient statistics match the expected values and that it is easy to determine the standard errors or confidence intervals. 
-Some features in freMTPL2freq require some changes for better predictive performance in the GLM. These include $DrivAge$, $VehAge$, and $Density$. As previously mentioned, driver age and vehicle age have nonlinear relationships with insurance risk. At a young age, typically between 18 and 25, the risk of accidents rises sharply, as does the severity of claims. Insurance risk, tracked by these two features, drops steadily through the mid to late twenties, settling into a minimal level in the middle age from 30 through to 60, then rises again towards and past the 70s. For this reason, the feature was binned, capturing ages 18-20 and 21-25, showing the increase in claims, and the stabilizing around 26-30, 31-40, and 41-50, and the subsequent increase in 51-70, 70+. Similarly, the vehicle age starts rising sharply on the left side, and forms a plateau at around 18 years. As such, linear terms would not sufficiently capture these nonlinear interactions. Similarly, the population density feature $Density$ is log-transformed to linearise its multiplicative interaction with insurance risk. This makes it easy to fit with a GLM, and reduces the effect of outliers in the feature. The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage. While the GLM is backed by a sound mathematical foundation on the suitability of a Poisson GLM with a log link function, the choices discussed here are made quite arbitrarily and there is  literature backing alternative approaches. As such, these choices carry the illusion of arbitrariness discussed in chapter 2. 
-The sprcification of the GLM is, therefore, as shown below: 
+The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the asymmetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that mathematically, the sufficient statistics match the expected values and that it is easy to determine the standard errors or confidence intervals. 
+Some features in freMTPL2freq require some changes for better predictive performance in the GLM. These include $DrivAge$, $VehAge$, and $Density$. As previously mentioned, driver age and vehicle age have nonlinear relationships with insurance risk. At a young age, typically between 18 and 25, the risk of accidents rises sharply, as does the severity of claims. Insurance risk, tracked by these two features, drops steadily through the mid to late twenties, settling into a minimal level in the middle age from 30 through to 60, then rises again towards and past the 70s. For this reason, the feature was binned, capturing ages 18-20 and 21-25, showing the increase in claims, and the stabilizing around 26-30, 31-40, and 41-50, and the subsequent increase in 51-70, 70+. Similarly, the vehicle age starts rising sharply on the left side, and forms a plateau at around 18 years. As such, linear terms would not sufficiently capture these nonlinear interactions. Similarly, the population density $Density$ and bonus/malus $BonusMalus$ features are log-transformed into $DensityLog$ and $BonusMalusLog$ respectively to linearise their multiplicative interaction with insurance risk. This makes them easier to fit with a GLM, and reduces the effect of outliers in the feature. 
+The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage. While the GLM is backed by a sound mathematical foundation on the suitability of a Poisson GLM with a log link function, the choices discussed here are made quite arbitrarily and there is  literature backing alternative approaches. As such, these choices carry the illusion of arbitrariness discussed in chapter 2. 
+The specification of the GLM is, therefore, as shown below: 
 
-```{r, include=TRUE, echo = FALSE}
+```{r, include=TRUE, echo = True}
+glm_freq <- glm(
+  ClaimNb ~ offset(log(Exposure)) + VehPower + DrivAgeBin + VehAgeBin + 
+    BonusMalusLog + VehBrand + VehGas + Area + DensityLog + Region,
+  family = poisson(link = log),
+  data = train 
+)
 
+summary(glm_freq)
+```
+
+#### Gradient Boosting Machine
+For comparison, the study also builds a GBM with the same Poisson objective to model claim frequency, with the exposure offset. However, the GBM would have better representation learning with continuous features. As such, rather than the binned versions of $VehAge$ and $DrivAge$, the model uses the features as they are, with the log-transformed versions of $BonusMalus$ and $Density$. This is meant to create a controlled comparison of the predictive approach in the GLM and the GBM, without changing the modeling philosophy underlying both models. The study specifies a LightGBM over classic GBM or XGBoost because it converges faster with much lower loss and higher accuracy. LightGBM achieves this through leaf-wise growth rather than tree-wise growth as other GBMs do. However, this requires a specification of `max_depth` and `num_leaves`. Further, LightGBM uses less memory and executes its decision cuts faster by scanning discrete bins instead of every value to find the optimal split. 
+LightGBM also handles categorical variables natively, using a partition mechanism based on Fisher (1958). This approach maps the categorical variables into non-negative integers, then explicitly passes the column names into the feature parameter. For any node split, LightGBM then finds the optimal categorical boundaries by sorting the discrete bins and calculating the sum of gradients divided by the sun of Hessians. This ranks the categories effectively based on their contributions to the residual errors of the model. This sorting exponentially simplifies the problem of finding the category split. 
+
+```{r, include=TRUE, echo = True}
+require(lightgbm)
+
+continuous_features <- c("VehPower", "DrivAge", "VehAge", "BonusMalusLog","DensityLog")
+categorical_features <- c("VehBrand", "VehGas", "Area", "Region")
+
+train_prepped <- train
+train_prepped[categorical_features] <- lapply(train_prepped[categorical_features], 
+                                              function(x) as.integer(as.factor(x)))
+
+train_matrix <- as.matrix(train_prepped[, c(continuous_features, categorical_features)])
+
+lightgbm_train <- lgb.Dataset(
+  data = train_matrix,
+  label = train$ClaimNb,
+  init_score = log(train$Exposure), 
+  categorical_feature = categorical_features
+)
+
+grid_search <- expand.grid(
+  num_leaves = c(15, 31, 63, 127),
+  max_depth = c(4, 6, 9, 12),
+  min_data_in_leaf = c(50, 100, 500, 1000)
+)
+
+# Grid results for comparison
+grid_results <- data.frame()
+
+print(paste("Beginning grid search over: ", nrow(grid_search), "combinations..."))
+
+for(i in 1:nrow(grid_search)) {
+  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
+  params <- list(
+    objective          = "poisson",
+    metric             = "poisson",
+    learning_rate      = 0.1, 
+    num_leaves         = grid_search$num_leaves[i],
+    max_depth          = grid_search$max_depth[i],
+    min_data_in_leaf   = grid_search$min_data_in_leaf[i],
+    num_threads        = 2
+  )
+  cross_validation_model <- lgb.cv(
+    params                = params,
+    data                  = lightgbm_train,
+    nrounds               = 1000,
+    nfold                 = 5, 
+    early_stopping_rounds = 30, 
+    verbose               = -1
+  )
+  best_iteration <- cross_validation_model$best_iteration
+  
+  valid_history <- cross_validation_model$record_evals$valid$poisson$eval
+  best_loss <- valid_history[[best_iteration]]
+  
+  cat(sprintf("Optimal Trees: %d | Validation Poisson Deviance: %.5f\n",
+              best_iteration, best_loss))
+  
+  # Organise results in summary tracker
+  current_results <- data.frame(
+    num_leaves        = params$num_leaves,
+    max_depth         = params$max_depth,
+    min_data_in_leaf  = params$min_data_in_leaf,
+    best_trees        = best_iteration,
+    valid_deviance    = best_loss
+  )
+  grid_results <- rbind(grid_results, current_results)
+}
+
+grid_results <- grid_results %>% arrange(valid_deviance) 
+print("Top Structural Layouts: ")
+print(head(grid_results, 5))
 
 ```
 
