@@ -1,0 +1,30 @@
+
+final_params <- c(base_params, as.list(best[, c("num_leaves", "min_data_in_leaf")]))
+
+final_model <- lgb.train(
+  params = final_params, 
+  data = lightgbm_train, 
+  nrounds = best$best_trees, 
+  verbose = -1)
+
+# Test set evaluation
+poisson_deviance <- function(y, mu) { 
+  2*mean(ifelse(y>0, y*log(y/mu), 0) - (y-mu))
+}
+
+test_matrix <- prep_matrix(test)
+mu_test <- predict(final_model, test_matrix)*test$Exposure
+
+cat(sprintf("\nTest Poisson deviance: %.5f\n", poisson_deviance(test$ClaimNb, mu_test)))
+cat(sprintf("Calibration check: predicted %.0f vs observed%.0f claims (ratio %.3f)\n",
+            sum(mu_test), sum(test$ClaimNb), sum(mu_test)/sum(test$ClaimNb)))
+
+saveRDS(
+  list(
+    grid        = grid_results,  
+    params      = final_params, 
+    nrounds     = best$best_trees,
+    folds       = folds, 
+    cat_levels  = cat_levels),
+  "lgb_final_artifacts.rds"
+)

@@ -396,77 +396,134 @@ summary(glm_freq)
 For comparison, the study also builds a GBM with the same Poisson objective to model claim frequency, with the exposure offset. However, the GBM would have better representation learning with continuous features. As such, rather than the binned versions of $VehAge$ and $DrivAge$, the model uses the features as they are, with the log-transformed versions of $BonusMalus$ and $Density$. This is meant to create a controlled comparison of the predictive approach in the GLM and the GBM, without changing the modeling philosophy underlying both models. The study specifies a LightGBM over classic GBM or XGBoost because it converges faster with much lower loss and higher accuracy. LightGBM achieves this through leaf-wise growth rather than tree-wise growth as other GBMs do. However, this requires a specification of `max_depth` and `num_leaves`. Further, LightGBM uses less memory and executes its decision cuts faster by scanning discrete bins instead of every value to find the optimal split. 
 LightGBM also handles categorical variables natively, using a partition mechanism based on Fisher (1958). This approach maps the categorical variables into non-negative integers, then explicitly passes the column names into the feature parameter. For any node split, LightGBM then finds the optimal categorical boundaries by sorting the discrete bins and calculating the sum of gradients divided by the sun of Hessians. This ranks the categories effectively based on their contributions to the residual errors of the model. This sorting exponentially simplifies the problem of finding the category split. 
 
-```{r, include=TRUE, echo = True}
+```{r, include=TRUE, echo = False}
 require(lightgbm)
 
+seed <- 42
+k_folds <- 5
+lr <- 0.05
+nrounds <- 3000
+
+# --- Data import and structuring ---
 continuous_features <- c("VehPower", "DrivAge", "VehAge", "BonusMalusLog","DensityLog")
 categorical_features <- c("VehBrand", "VehGas", "Area", "Region")
+all_features <- c(continuous_features, categorical_features)
 
-train_prepped <- train
-train_prepped[categorical_features] <- lapply(train_prepped[categorical_features], 
-                                              function(x) as.integer(as.factor(x)))
-
-train_matrix <- as.matrix(train_prepped[, c(continuous_features, categorical_features)])
-
-lightgbm_train <- lgb.Dataset(
-  data = train_matrix,
-  label = train$ClaimNb,
-  init_score = log(train$Exposure), 
-  categorical_feature = categorical_features
-)
-
-grid_search <- expand.grid(
-  num_leaves = c(15, 31, 63, 127),
-  max_depth = c(4, 6, 9, 12),
-  min_data_in_leaf = c(50, 100, 500, 1000)
-)
-
-# Grid results for comparison
-grid_results <- data.frame()
-
-print(paste("Beginning grid search over: ", nrow(grid_search), "combinations..."))
-
-for(i in 1:nrow(grid_search)) {
-  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
-  params <- list(
-    objective          = "poisson",
-    metric             = "poisson",
-    learning_rate      = 0.1, 
-    num_leaves         = grid_search$num_leaves[i],
-    max_depth          = grid_search$max_depth[i],
-    min_data_in_leaf   = grid_search$min_data_in_leaf[i],
-    num_threads        = 2
-  )
-  cross_validation_model <- lgb.cv(
-    params                = params,
-    data                  = lightgbm_train,
-    nrounds               = 1000,
-    nfold                 = 5, 
-    early_stopping_rounds = 30, 
-    verbose               = -1
-  )
-  best_iteration <- cross_validation_model$best_iteration
-  
-  valid_history <- cross_validation_model$record_evals$valid$poisson$eval
-  best_loss <- valid_history[[best_iteration]]
-  
-  cat(sprintf("Optimal Trees: %d | Validation Poisson Deviance: %.5f\n",
-              best_iteration, best_loss))
-  
-  # Organise results in summary tracker
-  current_results <- data.frame(
-    num_leaves        = params$num_leaves,
-    max_depth         = params$max_depth,
-    min_data_in_leaf  = params$min_data_in_leaf,
-    best_trees        = best_iteration,
-    valid_deviance    = best_loss
-  )
-  grid_results <- rbind(grid_results, current_results)
+# Store and reuse train levels for the test
+cat_levels <- lapply(train[categorical_features], function(x) levels(as.factor(x)))
+prep_matrix <- function(df) {
+  out <- df[, all_features]
+  for (v in categorical_features) {
+    out[[v]] <- match(as.character(out[[v]]), cat_levels[[v]]) - 1L
+  }
+  as.matrix(out)
 }
 
-grid_results <- grid_results %>% arrange(valid_deviance) 
+train_matrix <- prep_matrix(train)
+
+lightgbm_train <- lgb.Dataset(
+  data                  = train_matrix, 
+  label                 = train$ClaimNb,                    # Target variable
+  init_score            = log(train$Exposure),              # Offset
+  categorical_feature   = categorical_features,             # Explicit indication
+  params                = list(features_pre_filter = FALSE) # Vary min_data_in_leaf
+)
+
+# Using the same folds for every configuration to stabilise differences in score
+make_folds <- function(y, k, seed) {
+  set.seed(seed)
+  strata <- as.integer(y>0)
+  fold_id <- integer(length(y))
+  for (s in unique(strata)) {
+    idx <- which(strata == s)
+    fold_id[idx] <- sample(rep_len(seq_len(k), length(idx)))
+  }
+  lapply(seq_len(k), function(f) which(fold_id == f))
+}
+
+folds <- make_folds(train$ClaimNb, k_folds, seed)
+
+# De-center depth, focus on the number of leaves
+grid_search <- expand.grid(
+  num_leaves = c(15, 31, 63, 127),
+  min_data_in_leaf = c(100, 250, 500, 1000)
+)
+
+# grid_search <- subset(grid_search, num_leaves <=2^max_depth)
+
+base_params <- list(
+  objective          = "poisson",
+  metric             = "poisson",  # Poisson Negative log-likelihood
+  max_depth          = -1,
+  learning_rate      = lr, 
+  seed               = seed,
+  num_threads        = 2,
+  deterministic      = TRUE,       # Reproducible results
+  force_row_wise     = TRUE,
+  verbose            = -1
+)
+
+# Grid search
+results <- vector("list", nrow(grid_search))
+
+for(i in seq_len(nrow(grid_search))) {
+  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
+  params <- c(base_params, as.list(grid_search[i, ]))
+
+  cv <- lgb.cv(
+    params                = params,
+    data                  = lightgbm_train,
+    nrounds               = nrounds,
+    folds                 = folds,
+    early_stopping_rounds = 50, 
+    verbose               = -1
+  )
+  
+  history <- unlist(cv$record_evals$valid$poisson$eval)
+  best_iter <- cv$best_iter
+  if(is.null(best_iter)||length(best_iter) == 0||best_iter < 1)
+     best_iter <- which.min(history)
+  best_loss <- history[best_iter]
+  err_hist <- unlist(cv$record_evals$valid$poisson$eval_err)
+  best_sd <- if (length(err_hist) >= best_iter) err_hist[best_iter] else NA_real_
+  
+  cat(sprintf(" trees: %d | CV Poisson NLL: %.5f\n",best_iter, best_loss))
+  
+  # Organised results in summary tracker
+  results[[i]] <- data.frame(
+    grid_search[i, ],
+    best_trees  = best_iter,
+    valid_nll   = best_loss,
+    hit_cap     = best_iter>=nrounds,
+    valid_se    = best_sd/sqrt(k_folds)
+  )
+}
+
+grid_results <- do.call(rbind, results)
+grid_results <- grid_results[order(grid_results$valid_nll), ]
+rownames(grid_results) <- NULL
+
+cat("\nAll configurations, best first: \n")
+print(grid_results, digits = 5)
+
 print("Top Structural Layouts: ")
 print(head(grid_results, 5))
+
+best <- grid_results[1, ]
+cat(sprintf("\nBest num_leaves = %d (grid %d-%d)\n",
+            best$num_leaves, min(grid_search$num_leaves), 
+            max(grid_search$num_leaves),best$min_data_in_leaf,
+            min(grid_search$min_data_in_leaf), max(grid_search$min_data_in_leaf)
+            ))
+
+if (best$num_leaves %in% range(grid_search$num_leaves)||
+    best$min_data_in_leaf %in% range(grid_search$min_data_in_leaf)) {
+  cat("Best configuration is on the grid edge: consider extending the grid.\n")
+}
+if (any(grid_results$hit_cap)) {
+  cat("Some runs hit NROUNDS: raise it.\n")
+}
+
 
 ```
 
