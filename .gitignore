@@ -1,0 +1,49 @@
+# --- R workspace and saved objects ---
+.RData
+.Rhistory
+.Rapp.history
+*.RData
+*.Rdata
+*.rdata
+*.rda
+*.rds
+
+# --- RStudio ---
+.Rproj.user/
+.Ruserdata
+*.Rproj
+
+# --- R Markdown / knitr output and caches ---
+*_cache/
+*_files/
+.Rmd_cache/
+*.knit.md
+*.utf8.md
+
+# --- Large data and model files ---
+*.csv
+*.parquet
+*.feather
+*.zip
+*.txt.gz
+*.model
+*.lgb
+*.h5
+*.keras
+*.pt
+*.pth
+
+# --- Package management (remove this line if you want renv.lock tracked) ---
+renv/library/
+renv/staging/
+
+# --- OS and editor files ---
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# --- Secrets ---
+.Renviron
+.env
