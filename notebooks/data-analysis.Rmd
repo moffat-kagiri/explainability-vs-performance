@@ -421,6 +421,7 @@ prep_matrix <- function(df) {
 
 train_matrix <- prep_matrix(train)
 
+# Train model, 
 lightgbm_train <- lgb.Dataset(
   data                  = train_matrix, 
   label                 = train$ClaimNb,                    # Target variable
@@ -443,6 +444,7 @@ make_folds <- function(y, k, seed) {
 
 folds <- make_folds(train$ClaimNb, k_folds, seed)
 
+# Hyperparameter tuning
 # De-center depth, focus on the number of leaves
 grid_search <- expand.grid(
   num_leaves = c(15, 31, 63, 127),
@@ -526,6 +528,8 @@ if (any(grid_results$hit_cap)) {
 
 
 ```
+
+
 
 ### Evaluation Framework
 
