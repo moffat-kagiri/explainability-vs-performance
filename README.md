@@ -3,7 +3,7 @@
 **The Explainability–Performance Frontier in Insurance Risk Models: A Decision Framework for Actuarial Model Selection**
 
 MSc Data Science Dissertation — University of East London (UEL-DS-7010)
-Author: Kagiri | Supervisor: Dr. Konstantinos Vrachimis
+Author: Moffat Kagiri | Supervisor: Dr. Konstantinos Vrachimis
 
 > ⚠️ This is a working repository, updated as the project progresses through proposal, literature review, methodology, empirical work, and write-up. Expect structural changes.
 
