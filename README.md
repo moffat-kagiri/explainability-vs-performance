@@ -103,8 +103,8 @@ Key committed artefacts: `test_idx.rds` (test-set row indices) and `model_select
 
 | Phase | Focus | Status |
 |---|---|---|
-| 1 | Foundation & Proposal | TBC |
-| 2 | Literature Review | TBC |
+| 1 | Foundation & Proposal | ✅ Complete |
+| 2 | Literature Review | ✅ Complete |
 | 3 | Methodology & Data | ✅ Data, split and GBM tuning done |
 | 4 | Empirical Work | 🚧 In progress (ANN next) |
 | 5 | Framework Development | ⏳ Not started |
