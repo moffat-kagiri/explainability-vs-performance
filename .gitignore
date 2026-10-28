@@ -4,9 +4,9 @@
 .Rapp.history
 *.RData
 *.Rdata
+*.RdataTmp
 *.rdata
 *.rda
-*.rds
 
 # --- RStudio ---
 .Rproj.user/

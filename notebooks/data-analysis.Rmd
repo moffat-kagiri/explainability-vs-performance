@@ -191,7 +191,7 @@ plot_vehicle <- ggplot(vehicle_rate, aes(x = VehAge, y = claim_rate)) +
 grid.arrange(plot_driver, plot_vehicle, ncol = 2)
 ```
 
-According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few risks losing critical variations in the portfolio's risk profile. As such, the first instinct was to model these features as continuous variables for optimal learning. However, the distribution of claim frequency with age creates a u-shaped curve and would lead to underfitting in GLMs. As such, $DrivAge$ and $VehAge$ are binned at appropriate levels for modeling with the GLM. This is done with new variables $DrivAgeBin$ and $VehAgeBin$ , while the initial features are maintained as continuous variables for use with the GBM and ANN. These  which can detect the non-linearity they demonstrate.
+According to Goldburd et. al., having too many parameters on a model risks it overfitting the data. However, giving it too few risks losing critical variations in the portfolio's risk profile. As such, the first instinct is to model these features as continuous variables for optimal learning. However, the distribution of claim frequency with age creates a u-shaped curve and would lead to underfitting in GLMs. As such, $DrivAge$ and $VehAge$ are binned at appropriate levels for modeling with the GLM. This is done with new variables $DrivAgeBin$ and $VehAgeBin$ , while the initial features are maintained as continuous variables for use with the GBM and ANN. These  which can detect the non-linearity they demonstrate.
 
 ```{r, include=TRUE, echo = FALSE}
 # Background Aggregation
@@ -355,20 +355,33 @@ ggplot(data = mapdata) +
   geom_sf_text(aes(label = Region), size = 2, color = "black", check_overlap = TRUE)
 ```
 For further assessment, the study mapped the claim frequency as shown above. As the map demonstrates, the widely varying exposure-adjusted claim frequency alludes to the significance of the region of residence in determining the insurance risk in a given policy. 
-The final step in preprocessing the dataset is to split it into a training dataset and a test dataset to enable the validation of the representation learning that takes place when modelling claim frequency as an indicator of insurance risk. For sufficient learning, the study follows the judgement in Noll et. al. in having a large portion of the dataset in the training dataset, and a smaller portion for testing, with a 90-10 ratio. As such, this split provides 610,191 policies in the training portion and leaves 67,800 for the test data. A fair measure of the predictive accuracy needs to cover all levels of risk. In the case of this analysis, the majority of policies have no claims for the year they were observed in. As such, a simple random split may end up having a disproportionate amount of zeros to actual claim counts. To prevent this, it would be ideal to have a balanced amount of policies with claims in both the training and test datasets, which can be achieved with a stratified split by claim occurrence. This is achieved below by starting with a binary indicator ($HasClaim$) which tells whether a policy has a claim or not. As a result, this split ensures that the performance comparison is meaningful and not noisy, as the differences in the models are reliably attributed to their approaches and not artifacts in the data. 
+The final step in preprocessing the dataset is to split it into a training dataset and a test dataset to enable the validation of the representation learning that takes place when modelling claim frequency as an indicator of insurance risk. For sufficient learning, the study follows the judgement in Noll et. al. in having a large portion of the dataset in the training dataset, and a smaller portion for testing, with a 90-10 ratio. However, it first groups the policies, where policies with identical covariates are treated as one group, to minimise leakage rhrough different covariates. As such, this split provides 610,246 policies in the training portion and leaves 67,745 for the test data. A fair measure of the predictive accuracy needs to cover all levels of risk. In the case of this analysis, the majority of policies have no claims for the year they were observed in. As such, a simple random split may end up having a disproportionate amount of zeros to actual claim counts. To prevent this, it would be ideal to have a balanced amount of policies with claims in both the training and test datasets, which can be achieved with a stratified split by claim occurrence. This is achieved below by starting with a binary indicator ($HasClaim$) which tells whether a policy has a claim or not. As a result, this split ensures that the performance comparison is meaningful and not noisy, as the differences in the models are reliably attributed to their approaches and not artifacts in the data. 
 ```{r, include=TRUE, echo = FALSE}
 require(rsample)
 
-freMTPL2freq <- freMTPL2freq %>%
-  mutate(HasClaim = factor(ifelse(ClaimNb> 0, 1, 0)))
+profile_columns <- c("VehPower", "VehAge", "DrivAge", "BonusMalus", "VehBrand", 
+                     "VehGas", "Area", "Density", "Region")
 
-split <- initial_split(freMTPL2freq, prop = 0.9, strata = HasClaim)
-train <- training(split)
-test <- testing(split)
+key <- do.call(paste, c(freMTPL2freq[profile_columns], sep = "|"))
+grp <- match(key, unique(key))
 
-# Remove the helper column
-train <- train%>% select(-HasClaim)
-test <- test %>% select(-HasClaim)
+set.seed(2026)
+all_groups <- unique(grp)
+test_groups <- sample(all_groups, round(0.10*length(all_groups)))
+
+is_test <- grp %in% test_groups
+
+train <- freMTPL2freq[!is_test, ]
+test <- freMTPL2freq[is_test, ]
+
+# Save Split
+saveRDS(which(is_test), "test_set.rds")
+
+mean(is_test)                                          
+mean(key[is_test] %in% key[!is_test])                  # Should be 0
+c(train = sum(train$ClaimNb) / sum(train$Exposure),    # frequencies should be close
+  test  = sum(test$ClaimNb)  / sum(test$Exposure))
+max(table(grp))                                        # largest group size
 
 ```
 
@@ -377,26 +390,35 @@ Having established the shape and distribution of claim occurrences in the datase
 
 #### Generalized Linear Model
 The study specifies a Poisson GLM with a log link function. This model is an industry standard in actuarial pricing for various reasons. Ohlsson and Johansson, (2010) posit that despite the nature of linear models, this type of GLMs can ensures positive claim predictions and prevents the underpricing of risks as a result of the asymmetry of insurance data. It also creates a multiplicative structure for pricing as opposed to an additive one. Much to the actuary's convenience, the log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter. This ensures that mathematically, the sufficient statistics match the expected values and that it is easy to determine the standard errors or confidence intervals. 
-Some features in freMTPL2freq require some changes for better predictive performance in the GLM. These include $DrivAge$, $VehAge$, and $Density$. As previously mentioned, driver age and vehicle age have nonlinear relationships with insurance risk. At a young age, typically between 18 and 25, the risk of accidents rises sharply, as does the severity of claims. Insurance risk, tracked by these two features, drops steadily through the mid to late twenties, settling into a minimal level in the middle age from 30 through to 60, then rises again towards and past the 70s. For this reason, the feature was binned, capturing ages 18-20 and 21-25, showing the increase in claims, and the stabilizing around 26-30, 31-40, and 41-50, and the subsequent increase in 51-70, 70+. Similarly, the vehicle age starts rising sharply on the left side, and forms a plateau at around 18 years. As such, linear terms would not sufficiently capture these nonlinear interactions. Similarly, the population density $Density$ and bonus/malus $BonusMalus$ features are log-transformed into $DensityLog$ and $BonusMalusLog$ respectively to linearise their multiplicative interaction with insurance risk. This makes them easier to fit with a GLM, and reduces the effect of outliers in the feature. 
+Some features in freMTPL2freq require some changes for better predictive performance in the GLM. These include $DrivAge$, $VehAge$, and $Density$. As previously mentioned, driver age and vehicle age have nonlinear relationships with insurance risk. At a young age, typically between 18 and 25, the risk of accidents rises sharply, as does the severity of claims. Insurance risk, tracked by these two features, drops steadily through the mid to late twenties, settling into a minimal level in the middle age from 30 through to 60, then rises again towards and past the 70s. For this reason, the feature is binned, capturing ages 18-20 and 21-25, showing the increase in claims, and the stabilizing around 26-30, 31-40, and 41-50, and the subsequent increase in 51-70, 70+. Similarly, the vehicle age starts rising sharply on the left side, and forms a plateau at around 18 years. As such, linear terms would not sufficiently capture these nonlinear interactions. Similarly, the population density $Density$ and bonus/malus $BonusMalus$ features are log-transformed into $DensityLog$ and $BonusMalusLog$ respectively to linearise their multiplicative interaction with insurance risk. This makes them easier to fit with a GLM, and reduces the effect of outliers in the feature. 
 The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage. While the GLM is backed by a sound mathematical foundation on the suitability of a Poisson GLM with a log link function, the choices discussed here are made quite arbitrarily and there is  literature backing alternative approaches. As such, these choices carry the illusion of arbitrariness discussed in chapter 2. 
 The specification of the GLM is, therefore, as shown below: 
 
 ```{r, include=TRUE, echo = True}
-glm_freq <- glm(
-  ClaimNb ~ offset(log(Exposure)) + VehPower + DrivAgeBin + VehAgeBin + 
-    BonusMalusLog + VehBrand + VehGas + Area + DensityLog + Region,
-  family = poisson(link = log),
-  data = train 
-)
+glm_formula <- ClaimNb ~ offset(log(Exposure)) + VehPower + DrivAgeBin + VehAgeBin +
+  BonusMalusLog + VehBrand + VehGas + Area + DensityLog + Region
+
+glm_freq <- glm(glm_formula,family = poisson(link = log), data = train)
 
 summary(glm_freq)
+
+# CV for comparison with GBM and ANN
+glm_cv <- sapply(folds, function(test_set) {
+  fit <- glm(glm_formula, family = poisson(link = log), data = train[-test_set, ])
+  mu <- predict(fit, newdata = train[test_set,], type = "response")
+  # Calculate Poisson NLL
+  mean(mu - train$ClaimNb[test_set]*log(mu))
+})
+
+# CV Results
+c(mean = mean(glm_cv), sd(glm_cv)/sqrt(length(glm_cv)))
+
 ```
 
 #### Gradient Boosting Machine
-For comparison, the study also builds a GBM with the same Poisson objective to model claim frequency, with the exposure offset. However, the GBM would have better representation learning with continuous features. As such, rather than the binned versions of $VehAge$ and $DrivAge$, the model uses the features as they are, with the log-transformed versions of $BonusMalus$ and $Density$. This is meant to create a controlled comparison of the predictive approach in the GLM and the GBM, without changing the modeling philosophy underlying both models. The study specifies a LightGBM over classic GBM or XGBoost because it converges faster with much lower loss and higher accuracy. LightGBM achieves this through leaf-wise growth rather than tree-wise growth as other GBMs do. However, this requires a specification of `max_depth` and `num_leaves`. Further, LightGBM uses less memory and executes its decision cuts faster by scanning discrete bins instead of every value to find the optimal split. 
-LightGBM also handles categorical variables natively, using a partition mechanism based on Fisher (1958). This approach maps the categorical variables into non-negative integers, then explicitly passes the column names into the feature parameter. For any node split, LightGBM then finds the optimal categorical boundaries by sorting the discrete bins and calculating the sum of gradients divided by the sun of Hessians. This ranks the categories effectively based on their contributions to the residual errors of the model. This sorting exponentially simplifies the problem of finding the category split. 
+For comparison, the study also builds a GBM with a Poisson objective and an exposure offset to model claim frequency. The GBM would have better representation learning with continuous features. As such, rather than the binned versions of `VehAge` and `DrivAge`, the model uses the continuous version of these two features and the log-transformed versions of `BonusMalus` and `Density`. This is meant to create a controlled comparison of the predictive approach in the GLM and the GBM, without changing the modeling philosophy underlying both models. The study specifies a LightGBM over classic GBM or XGBoost because it converges faster with much lower loss and higher accuracy. LightGBM achieves this through leaf-wise growth rather than tree-wise growth as other GBMs do. Further, LightGBM uses less memory and executes its decision cuts faster by scanning discrete bins instead of every value to find the optimal split. LightGBM also handles categorical variables natively, using a partition mechanism based on Fisher (1958). This approach maps the categorical variables into non-negative integers, then explicitly passes the column names into the feature parameter. For any node split, LightGBM then finds the optimal categorical boundaries by sorting the discrete bins and calculating the sum of gradients divided by the sun of Hessians. This ranks the categories effectively based on their contributions to the residual errors of the model. Thus exponentially simplifying the problem of finding the category split. 
 
-```{r, include=TRUE, echo = False}
+```{r, eval=FALSE,include=TRUE, echo = False}
 require(lightgbm)
 
 seed <- 42
@@ -447,8 +469,8 @@ folds <- make_folds(train$ClaimNb, k_folds, seed)
 # Hyperparameter tuning
 # De-center depth, focus on the number of leaves
 grid_search <- expand.grid(
-  num_leaves = c(15, 31, 63, 127),
-  min_data_in_leaf = c(100, 250, 500, 1000)
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
 )
 
 # grid_search <- subset(grid_search, num_leaves <=2^max_depth)
@@ -512,7 +534,7 @@ print("Top Structural Layouts: ")
 print(head(grid_results, 5))
 
 best <- grid_results[1, ]
-cat(sprintf("\nBest num_leaves = %d (grid %d-%d)\n",
+cat(sprintf("\nBest num_leaves = %d (grid %d-%d), min_data_in_leaf = %d (grid %d-%d)\n",
             best$num_leaves, min(grid_search$num_leaves), 
             max(grid_search$num_leaves),best$min_data_in_leaf,
             min(grid_search$min_data_in_leaf), max(grid_search$min_data_in_leaf)
@@ -528,10 +550,240 @@ if (any(grid_results$hit_cap)) {
 
 
 ```
-Hyperparameter tuning sits right between the initial model training and testing or deployment of GBMs. It helps to prevent overfitting and to optimize predictive performance. LightGBM provides the latitude to tune a wide array of hyperparameters, making the model very flexible and adaptable to our needs. This study relied on `num_leaves` and `min_data_in_leaf`. These two are directly identified in the official LightGBM guide as the primary levers by which one can manage model complexity and overfitting. As such, they are the natural pair to tune when optimizing the model. However, the study arrived at these after first trying a run with a bigger array of hyperparameters to tune. However, using `max_depth` was redundant as LightGBM grows leaf-wise, and it keeps `num_leaves` below 2^`max_depth`. As such, with the initial run having `num_leaves` between 7 and 127, deeper limits on `max_depth` behaved identically to being unbounded. Setting `max_depth = -1` removes this redundancy. The alternative to this approach would be resorting to random search, which is backed by Bergstra and Bengio, (2012). However, this would introduce more arbitrariness, add to the run-to-run randomness in the model, and potentially distract from the main discourse of this paper. Instead, a judgement call was made opting for a small grid which made for a deterministic and reproducible approach to modelling claim frequency. This approach is comparable across the thread in this study among GLM, GBM, and ANN. 
-While training the model and tuning, the study used five-fold cross validation with fixed folds, stratified by claim occurrence. This ensured that the diifferences in scores could be attributed to the parameters specified and not fold noise. The study looped the model through this grid and ranked the parameters by LightGBM's poisson negative log-likelihood, the core loss function in the model. The study passed the exposure offset to the model through the `init_score` argument, providing clarity not to treat exposure as a feature. If the model were allowed to treat $Exposure$ as a feature, it would learn the interactions between this measure and the claim frequency, potentially establishing a nonlinear interaction, while they are expected to be perfectly proportional. 
-From 
 
+Hyperparameter tuning sits right between the initial model training and testing or deployment of GBMs. It helps to prevent overfitting and to optimize predictive performance. LightGBM provides the latitude to tune a wide array of hyperparameters, making the model very flexible and adaptable to our needs. This study relied on `num_leaves` and `min_data_in_leaf`. These two are directly identified in the official LightGBM guide as the primary levers by which one can manage model complexity and overfitting. As such, they are the natural pair to tune when optimizing the model. In addition, early attempts at tuning reveal that using `max_depth` is redundant as LightGBM grows leaf-wise, and it keeps `num_leaves` below 2^`max_depth`. As such, with the initial run having `num_leaves` between 7 and 127, deeper limits on `max_depth` behave identically to being unbounded. Setting `max_depth = -1` removes this redundancy. The alternative to this approach would be resorting to a random search, which is backed by Bergstra and Bengio, (2012). However, this would introduce more arbitrariness, add to the run-to-run randomness in the model, and potentially distract from the main discourse of this paper. Instead, a judgement call is made opting for a small grid which made for a deterministic and reproducible approach to modelling claim frequency. This approach is comparable across the thread in this study among GLM, GBM, and ANN. 
+While training the model and tuning, the study uses five-fold cross validation with fixed folds, stratified by claim occurrence. This ensures that the differences in scores can only be attributed to the parameters specified and not to fold noise. The study loops the boosting machine through this grid and ranks the parameters by LightGBM's poisson negative log-likelihood, the core loss function in the model. The study passes the exposure offset to the model through the `init_score` argument.
+Having started with 4 levels of each `num_leaves` and `min_data_in_leaf`, the loop in the search strategy results indicate that the best configuration sits at the edge of the grid at `num_leaves = 63` and `min_data_in_leaf = 100`. However, the differences in Poisson NLL for different measures of `min_data_in_leaf` are diminishing as one observes them from `min_data_in_leaf = 100` to `1000`. The grid is then widened as shown below to confirm a bracketed optimum and validate that performance degrades outside the plateau. 
+```{r, eval=FALSE, echo=TRUE}
+grid_search <- expand.grid(
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
+)
+```
+
+This updated grid reveals a u-shape in the negative log-likelihood which bottoms out at 63 leaves. However, `min_data_in_leaf` still shows a subtle stagnation, improving at a reducing rate as it moves from 5000 down to 25. This improvement suggests that the model may  simply be memorizing the rows in the training dataset when using smaller leaves. This prompts further investigation into the number or proportion of policies with similar covariate-profiles that appear in the train data, creating the leakage between near-identical policies and producing the observed advantage of small leaves. This check returns 35.4% of train rows having an identical profile within the same dataset and 35.6% of test policies having their exact profile in train. This means that the models would be tested on data they have seen before, thus flattering the test deviance. This calls for a covariate-profile-conscious approach in splitting the dataset and in the GBM architecture.   
+```{r, eval=FALSE, echo=TRUE}
+# One string per covariate profile 
+key_train <- do.call(paste, c(train[all_features], sep = "|"))
+key_test  <- do.call(paste, c(test[all_features],  sep = "|"))
+
+# 1. Portion of TEST rows whose covariate profile also appears in TRAIN
+mean(key_test %in% key_train)
+
+# 2. Portion of TRAIN rows that have at least one identical-profile sibling in train
+mean(duplicated(key_train) | duplicated(key_train, fromLast = TRUE))
+
+```
+
+To test the outcome of grouping, the study reruns the 7*7 grid search and observes the change in the poisson NLL with respect to  `min_data_in_leaf`. In the results, the advantage of small leaves disappears, meaning that the leaky folds are now resolved. Further, the difference between different values of `min_data_in_leaf` for the same `num_leaves` are no longer significant. `num_leaves` also forms a flat surface from 4 to 127 with a spread under half an SE, and then deteriorates at 255 Poisson NLL across different combinations narrow down and only range from 0.15397 to 0.15443. The surface of the data thus reveals a genuine plateau with no edge problem. For context, the study then calculates the NLL for the GLM and scores it at 0.1565 against 0.15397 for the best GBM, a difference of 0.0025 and over 10 times the 0.00018 spread across the plateau or 5 times the spread of the whole grid. This suggests that model choice matters much more than the tuning within the plateau. 
+
+```{r, include=TRUE, echo = False}
+require(lightgbm)
+
+seed <- 42
+k_folds <- 5
+lr <- 0.05
+nrounds <- 3000
+
+# --- Data import and structuring ---
+continuous_features <- c("VehPower", "DrivAge", "VehAge", "BonusMalusLog","DensityLog")
+categorical_features <- c("VehBrand", "VehGas", "Area", "Region")
+all_features <- c(continuous_features, categorical_features)
+
+# Store and reuse train levels for the test
+cat_levels <- lapply(train[categorical_features], function(x) levels(as.factor(x)))
+prep_matrix <- function(df) {
+  out <- df[, all_features]
+  for (v in categorical_features) {
+    out[[v]] <- match(as.character(out[[v]]), cat_levels[[v]]) - 1L
+  }
+  as.matrix(out)
+}
+
+train_matrix <- prep_matrix(train)
+
+# Train model, 
+lightgbm_train <- lgb.Dataset(
+  data                  = train_matrix, 
+  label                 = train$ClaimNb,                    # Target variable
+  init_score            = log(train$Exposure),              # Offset
+  categorical_feature   = categorical_features,             # Explicit indication
+  params                = list(features_pre_filter = FALSE) # Vary min_data_in_leaf
+)
+
+# Using the same folds for every configuration to stabilise differences in score
+# Groups are now formed by covariate profile
+make_group_folds <- function(df, y, features, k, seed) {
+  key <- do.call(paste, c(df[features], sep = "|"))
+  # Group IDs
+  grp <- match(key, unique(key))                      
+  g_claim <- as.integer(tapply(y > 0, grp, max)) # 1 if any row in the group claimed
+
+  set.seed(seed)
+  g_fold <- integer(length(g_claim))
+  # stratify groups by claim/no-claim
+  for (s in 0:1) {                                    
+    idx <- which(g_claim == s)
+    g_fold[idx] <- sample(rep_len(seq_len(k), length(idx)))
+  }
+  # every row inherits its group's fold
+  fold_id <- g_fold[grp]
+  lapply(seq_len(k), function(f) which(fold_id == f))
+}
+
+folds <- make_group_folds(train, train$ClaimNb, all_features, k_folds, seed)
+
+# Hyperparameter tuning
+# De-center depth, focus on the number of leaves
+grid_search <- expand.grid(
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
+)
+
+# grid_search <- subset(grid_search, num_leaves <=2^max_depth)
+
+base_params <- list(
+  objective          = "poisson",
+  metric             = "poisson",  # Poisson Negative log-likelihood
+  max_depth          = -1,
+  learning_rate      = lr, 
+  seed               = seed,
+  num_threads        = 2,
+  deterministic      = TRUE,       # Reproducible results
+  force_row_wise     = TRUE,
+  verbose            = -1
+)
+
+# Grid search
+results <- vector("list", nrow(grid_search))
+
+for(i in seq_len(nrow(grid_search))) {
+  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
+  params <- c(base_params, as.list(grid_search[i, ]))
+
+  cv <- lgb.cv(
+    params                = params,
+    data                  = lightgbm_train,
+    nrounds               = nrounds,
+    folds                 = folds,
+    early_stopping_rounds = 50, 
+    verbose               = -1
+  )
+  
+  history <- unlist(cv$record_evals$valid$poisson$eval)
+  best_iter <- cv$best_iter
+  if(is.null(best_iter)||length(best_iter) == 0||best_iter < 1)
+     best_iter <- which.min(history)
+  best_loss <- history[best_iter]
+  err_hist <- unlist(cv$record_evals$valid$poisson$eval_err)
+  best_sd <- if (length(err_hist) >= best_iter) err_hist[best_iter] else NA_real_
+  
+  cat(sprintf(" trees: %d | CV Poisson NLL: %.5f\n",best_iter, best_loss))
+  
+  # Organised results in summary tracker
+  results[[i]] <- data.frame(
+    grid_search[i, ],
+    best_trees  = best_iter,
+    valid_nll   = best_loss,
+    hit_cap     = best_iter>=nrounds,
+    valid_se    = best_sd/sqrt(k_folds)
+  )
+}
+
+grid_results <- do.call(rbind, results)
+grid_results <- grid_results[order(grid_results$valid_nll), ]
+rownames(grid_results) <- NULL
+
+cat("\nAll configurations, best first: \n")
+print(grid_results, digits = 5)
+
+print("Top Structural Layouts: ")
+print(head(grid_results, 5))
+
+best <- grid_results[1, ]
+cat(sprintf("\nBest num_leaves = %d (grid %d-%d), min_data_in_leaf = %d (grid %d-%d)\n",
+            best$num_leaves, min(grid_search$num_leaves), 
+            max(grid_search$num_leaves),best$min_data_in_leaf,
+            min(grid_search$min_data_in_leaf), max(grid_search$min_data_in_leaf)
+            ))
+
+if (best$num_leaves %in% range(grid_search$num_leaves)||
+    best$min_data_in_leaf %in% range(grid_search$min_data_in_leaf)) {
+  cat("Best configuration is on the grid edge: consider extending the grid.\n")
+}
+if (any(grid_results$hit_cap)) {
+  cat("Some runs hit NROUNDS: raise it.\n")
+}
+
+# One string per covariate profile (same key as make_group_folds)
+key_train <- do.call(paste, c(train[all_features], sep = "|"))
+key_test  <- do.call(paste, c(test[all_features],  sep = "|"))
+
+# 1. Share of TEST rows whose profile also appears in TRAIN
+mean(key_test %in% key_train)
+
+# 2. Share of TRAIN rows that have at least one identical-profile sibling in train
+mean(duplicated(key_train) | duplicated(key_train, fromLast = TRUE))
+
+```
+Having ranked the models by the Poisson NLL, the final GBM configuration is fixed from the cross-validation results before any test-set evaluation. This keeps the test-set uninformative for model choice. This final configuration is meant to be ready to be compared against the GLM and the trained ANN. The study selects all configurations within one standard error of the best model with regard to Poisson NLL, and out of these, it picks the one with the smallest total number of leaves, which is given by the leaves per tree multiplied by the number of trees. The total number of leaves serves as a measure of model complexity that is relevant to the paper's discussion on explainability. The selection is not revisited after the test data is scored. 
+
+```{r, include=TRUE, echo=TRUE}
+grid_results$total_leaves <- grid_results$num_leaves*grid_results$best_trees
+valid_runs <- grid_results[!grid_results$hit_cap, ]
+sensitivity <- valid_runs[which.min(valid_runs$valid_nll), ]
+eligible <- valid_runs[valid_runs$valid_nll<=sensitivity$valid_nll+sensitivity$valid_se, ]
+selected <- eligible[order(eligible$total_leaves, eligible$valid_nll), ][1, ]
+print(selected, digits = 5); print(sensitivity, digits = 5)
+saveRDS(list(selected  = selected, 
+             sensitivity = sensitivity, 
+             grid = grid_results, 
+             locked_at = Sys.time()), 
+        "model_selection_locked.rds"
+        )
+```
+
+#### Artificial Neural Network
+The third model whose predictive accuracy and explainability the study investigates is a neural network. 
+
+```{r, include=TRUE, echo=FALSE}
+require(keras3)
+
+# ---Capture Data ---
+
+# Categorical inputs as embedded layers
+vehbrand_in <- layer_input(shape = 1, name = "VehBrand")
+vehbrand_emb <- vehbrand_in %>% layer_embedding(input_dim = n_brand, output_dim = 4) %>%
+  layer_flatten()
+
+vehgas_in <- layer_input(shape = 1, name = "VehGas")
+vehgas_emb <- vehgas_in %>% layer_embedding(input_dim = n_gas, output_dim = 2) %>%
+  layer_flatten()
+
+area_in <- layer_input(shape = 1, name = "Area")
+area_emb <- area_in %>% layer_embedding(input_dim = n_area, output_dim = 4) %>%
+  layer_flatten()
+
+region_in <- layer_input(shape = 1, name = "Region")
+region_emb <- region_in %>% layer_embedding(input_dim = n_region, output_dim = 8) %>%
+  layer_flatten()
+
+# Continuous inputs as a dense 
+cont_in <- layer_input(shape = 5, name = "continuous")
+
+combined <- layer_concatenate(list(vehgas_emb, vehgas_emb, area_emb, region_emb, cont_in)) %>%
+  layer_dense(units = 32, activation = "relu")%>%
+  layer_dense(units = 16, activation = "relu")%>%
+  layer_dense(units = 1, activation = "exponential", name = "rate")
+
+exposure_in <- layer_input(shape = 1, name = "Exposure")
+output <- layer_multiply(list(combined, exposure_in))
+
+model <- keras_model(inputs = list(vehbrand_in, vehgas_in, area_in, 
+                                   region_in, cont_in, exposure_in), outputs = output)
+model %>% compile(optimizer = "adam", loss = "poisson")
+
+```
 
 ### Evaluation Framework
 
