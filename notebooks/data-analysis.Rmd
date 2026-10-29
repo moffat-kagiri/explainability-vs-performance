@@ -744,44 +744,266 @@ saveRDS(list(selected  = selected,
 ```
 
 #### Artificial Neural Network
-The third model whose predictive accuracy and explainability the study investigates is a neural network. 
+The third model whose predictive accuracy and explainability the study investigates is a neural network. It estimates claim frequency with a Poisson negative log-likelihood loss function and an exposure offset. its expected claim count is derived as `out <- layer_multiply(list(rate, exposure_in))`. This matches the model philosophy established in both the GLM and GBM above. The categorical variables in the insurance data are converted into 0-based integer codes and captured into the network through embedded layers with dimensions captured in `emb_dim` which assigns `VehBrand` and `Area` 4 each, `VehGas`, 2, and `Region`, 8. The categorical variables are then concatenated with scaled continuous ones, both only from the `train` data. The output layer is initialised at the train data's claim frequency, so the training begins with an intercept-only model, then follows the loss function to pursue more accurate predictions. 
+The grid used in the ANN has four architectures with one to three hidden layers and two L2 penalties. These are compared by five-fold CV on the same folds created for the GBM setup, with early-stopping on the validation fold. The configurations are ranked by the NLL and the ones within 1 SE of the best one with regard to the cross validated loss are marked as eligible. From these, the final network is identified as the one with the fewest trainable parameters, in a much similar way as how the study selects the GBM with the fewest total leaves. As such, the study selects the simplest model of each class within 1 SE of the most accurate configuration. This selection is saved before any test evaluation and trained on the full `train` dataset. Rather than using the default number of epochs used for the tuning, the training run uses the median number of epochs in the cross-validation. The predictions are taken as the average of five networks trained from different random seeds, to reduce the run-to-run variability in the training. 
+
+
+
 
 ```{r, include=TRUE, echo=FALSE}
+# --- SETUP ---
+# ANN Set-up with grouped-CV tuning, locked selection, and seed ensemble final fit. 
+# Inheriting train, test, and folds from GBM setup. 
+
+if (!reticulate::py_available()) reticulate::py_require(python_version = "3.12")
 require(keras3)
 
-# ---Capture Data ---
+# Reused variables: train, folds, seed, k_folds, continuous_features, categorical_features
 
-# Categorical inputs as embedded layers
-vehbrand_in <- layer_input(shape = 1, name = "VehBrand")
-vehbrand_emb <- vehbrand_in %>% layer_embedding(input_dim = n_brand, output_dim = 4) %>%
-  layer_flatten()
+required <- c("train", "folds", "seed", "k_folds", "cat_levels",
+              "continuous_features", "categorical_features")
+missing_objects <- required[!sapply(required, exists)]
+if (length(missing_objects)>0) {
+  stop("Missing from the session: ", paste(missing_objects, collapse = ", "), 
+       call. = FALSE)
+}
+stopifnot(length(folds) == k_folds)
 
-vehgas_in <- layer_input(shape = 1, name = "VehGas")
-vehgas_emb <- vehgas_in %>% layer_embedding(input_dim = n_gas, output_dim = 2) %>%
-  layer_flatten()
+# ANN-specific settings
+QUICK          <- FALSE
+ANN_LR         <- 0.001
+BATCH          <- 4096
+MAX_EPOCHS     <- 200     # Safety cap
+PATIENCE       <- 10      # Early-stopping Patience
+N_FINAL_SEEDS  <- 5
 
-area_in <- layer_input(shape = 1, name = "Area")
-area_emb <- area_in %>% layer_embedding(input_dim = n_area, output_dim = 4) %>%
-  layer_flatten()
+emb_dim <- c(VehBrand = 4, VehGas = 2, Area = 4, Region = 8)
 
-region_in <- layer_input(shape = 1, name = "Region")
-region_emb <- region_in %>% layer_embedding(input_dim = n_region, output_dim = 8) %>%
-  layer_flatten()
+# --- CAPTURE DATA AS NETWORK INPUTS ---
 
-# Continuous inputs as a dense 
-cont_in <- layer_input(shape = 5, name = "continuous")
+# Categoricals as 0-based integer codes
+stopifnot(identical(
+  cat_levels, lapply(train[categorical_features], function(x) levels(as.factor(x)))
+))
 
-combined <- layer_concatenate(list(vehgas_emb, vehgas_emb, area_emb, region_emb, cont_in)) %>%
-  layer_dense(units = 32, activation = "relu")%>%
-  layer_dense(units = 16, activation = "relu")%>%
-  layer_dense(units = 1, activation = "exponential", name = "rate")
+# Continuous variables standardised to be more meaningful network inputs
+cont_centre <- colMeans(train[continuous_features])
+cont_scale  <- apply(train[continuous_features], 2, sd)
 
-exposure_in <- layer_input(shape = 1, name = "Exposure")
-output <- layer_multiply(list(combined, exposure_in))
+make_inputs <- function(df) {
+  inp <- lapply(categorical_features, function(v) {
+    # 0-based codes
+    code <- match(as.character(df[[v]]), cat_levels[[v]]) - 1L  
+    code[is.na(code)] <- length(cat_levels[[v]])
+    matrix(as.integer(code), ncol = 1)
+  })
+  names(inp) <- categorical_features
+  cont <- sweep(as.matrix(df[continuous_features]), 2, cont_centre, "-")
+  inp$continuous <- sweep(cont, 2, cont_scale, "/")
+  
+  # Exposure as a its own input
+  inp$Exposure <- matrix(df$Exposure, ncol = 1)
+  inp
+}
+subset_inputs <- function(inp, idx) lapply(inp, function(m) m[idx, , drop = FALSE])
 
-model <- keras_model(inputs = list(vehbrand_in, vehgas_in, area_in, 
-                                   region_in, cont_in, exposure_in), outputs = output)
-model %>% compile(optimizer = "adam", loss = "poisson")
+inp_train <- make_inputs(train)
+y_train <- train$ClaimNb
+base_freq <- sum(train$ClaimNb)/sum(train$Exposure)
+n_train <- nrow(train)
+
+# --- NETWORK BUILD ---
+
+# Model Specs
+build_model <- function(units, l2) {
+  reg  <- if(l2 > 0) regularizer_l2(l2) else NULL
+  ins  <- list()
+  embs <- list()
+  
+  # Embedded layers for all categorical codes
+  for (v in categorical_features) {
+    ins[[v]]  <- layer_input(shape = 1, name = v, dtype = "int32")
+    embs[[v]] <- ins[[v]] %>%
+      layer_embedding(input_dim = length(cat_levels[[v]]) + 1, 
+                      output_dim = emb_dim[[v]])%>%
+      layer_flatten()
+  }
+  cont_in     <- layer_input(shape = length(continuous_features), name = "continuous")
+  exposure_in <- layer_input(shape = 1, name = "Exposure")
+  
+  x <- layer_concatenate(c(unname(embs), list(cont_in)))
+  
+  # Pass the concatenated categorical vectors and the 5 scaled continuous variables
+  # through the hidden ReLu layers
+  for (u in units) {
+    x <- layer_dense(x, units = u, activation = "relu", kernel_regularizer = reg)
+  }
+  rate <- layer_dense(x, units = 1, activation = "exponential", name = "rate", 
+                      kernel_initializer = "zeros", 
+                      bias_initializer = initializer_constant(log(base_freq)))
+  
+  # Multiplying the output from the previous layer (annual claim rate) by the exposure, 
+  # gives the expected claims for a policy, the same structure as a log-link with 
+  # the exposure offset in the GLM or GBM
+  out <- layer_multiply(list(rate, exposure_in))
+  
+  model <- keras_model(inputs = c(unname(ins), list(cont_in, exposure_in)),
+                       outputs = out)
+  
+  # Loss is the Poisson Negative Log-Likelihood, same as GLM and GBM 
+  # NLL is given by $\mu - y*log\mu$
+  compile(model, optimizer = optimizer_adam(learning_rate = ANN_LR), loss = "poisson")
+  model
+}
+
+# Grid: 4 architectures and 2 L2 settings
+archs <- list(A = c(16), B = c(32, 16), C = c(64, 32), D = c(128, 64, 32))
+ann_cfg_grid <- expand.grid(arch = names(archs), l2 = c(0, 1e-5), stringsAsFactors = FALSE)
+
+K_RUN <- k_folds
+if (QUICK) {
+  ann_cfg_grid <- ann_cfg_grid[2, , drop = FALSE]; 
+  K_RUN <- 1; 
+  MAX_EPOCHS <- 3
+}
+
+# Cross validated tuning on the grouped folds
+# CV loss = Keras "poisson" loss (Poisson NLL without the constant) (the same
+# scale as the LightGBM poisson metric and the GLM CV score)
+
+fit_fold <- function(units, l2, tr_idx, va_idx) {
+  set_random_seed(seed)
+  model <- build_model(units, l2)
+  h <- fit(model,x = subset_inputs(inp_train, tr_idx), 
+           y = y_train[tr_idx], 
+           validation_data = list(subset_inputs(inp_train, va_idx), 
+                                  y_train[va_idx]),
+           epochs = MAX_EPOCHS, 
+           batch_size = BATCH, 
+           shuffle = TRUE, verbose = 0,
+           callbacks = list(callback_early_stopping(monitor = "val_loss", patience = PATIENCE,
+                                                    restore_best_weights = TRUE))
+  )
+  
+  # Record validation loss, best epoch, and parameter count, then clear memory
+  val <- unlist(h$metrics$val_loss)
+  out <- list(best_epoch = which.min(val), 
+              best_loss = min(val),
+              n_params = model$count_params())
+  clear_session()
+  out
+  }
+
+ann_results <- vector("list", nrow(ann_cfg_grid))
+
+# Print out the configurations and their losses
+for (i in seq_len(nrow(ann_cfg_grid))) {
+  cat(sprintf("\n--- Configuration %d/%d: arch %s, L2 %g ---\n",
+              i, nrow(ann_cfg_grid), ann_cfg_grid$arch[i], ann_cfg_grid$l2[i]))
+  fold_out <- vector("list", K_RUN)
+  for (k in seq_len(K_RUN)) {
+    t0     <- Sys.time()
+    va_idx <- folds[[k]]
+    tr_idx <- setdiff(seq_len(n_train), va_idx)
+    fold_out[[k]] <- fit_fold(archs[[ann_cfg_grid$arch[i]]], ann_cfg_grid$l2[i], tr_idx, va_idx)
+    cat(sprintf("  fold %d: best epoch %d | val loss %.5f | %.0fs\n", k,
+                fold_out[[k]]$best_epoch, fold_out[[k]]$best_loss,
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+  }
+  losses <- sapply(fold_out, `[[`, "best_loss")
+  epochs <- sapply(fold_out, `[[`, "best_epoch")
+  ann_results[[i]] <- data.frame(
+    arch         = ann_cfg_grid$arch[i], 
+    l2           = ann_cfg_grid$l2[i],
+    n_params     = fold_out[[1]]$n_params,
+    cv_loss      = mean(losses),
+    cv_se        = if (K_RUN > 1) sd(losses) / sqrt(K_RUN) else NA_real_, 
+    median_epoch = median(epochs),
+    hit_cap      = any(epochs >= MAX_EPOCHS)
+  )
+  saveRDS(do.call(rbind, ann_results), "ann_grid_checkpoint.rds")
+  }
+
+ann_grid <- do.call(rbind, ann_results)
+ann_grid <- ann_grid[order(ann_grid$cv_loss), ]
+rownames(ann_grid) <- NULL
+cat("\nANN grid, best first:\n"); print(ann_grid, digits = 5)
+
+if (QUICK) {
+  stop("Quick timing run finished. Set QUICK <- FALSE for the full run.", call. = FALSE)
+}
+
+# --- SELECTION AND LOCKING ---
+
+# Selection rule with the same logic as GBM
+
+# i. Drop capped runs
+ann_valid_runs  <- ann_grid[!ann_grid$hit_cap, ]
+
+# ii. Define the sensitivity case with the best `cv_loss`: 
+# everything within 1 SE of it is eligible
+ann_sensitivity <- ann_valid_runs[which.min(ann_valid_runs$cv_loss), ]
+ann_eligible    <- ann_valid_runs[ann_valid_runs$cv_loss<=ann_sensitivity$cv_loss + 
+                                    ann_sensitivity$cv_se, ]
+
+# iii. Select the eligible model with the fewest trainable parameters (least complex) 
+ann_selected    <- ann_eligible[order(ann_eligible$n_params, 
+                                      ann_eligible$cv_loss), ][1, ]
+
+cat("\nSelected (simplest eligible):\n"); print(ann_selected, digits = 5)
+cat("\nSensitivity (best CV score):\n");  print(ann_sensitivity, digits = 5)
+
+# Save specs of selected model
+saveRDS(list(selected = ann_selected, 
+             sensitivity = ann_sensitivity, 
+             grid = ann_grid,
+             archs = archs, 
+             settings = list(ANN_LR = ANN_LR, 
+                             BATCH = BATCH, 
+                             PATIENCE = PATIENCE,
+                             emb_dim = emb_dim, 
+                             seed = seed),
+             locked_at = Sys.time()),
+        "ann_selection_locked.rds")
+
+# --- FINAL FIT ---
+# Train the 2 selected configurations on the complete `train` dataset for median_epochs
+# No validation data, no early stopping
+fit_final <- function(cfg, run_seed) {
+  set_random_seed(run_seed)
+  model <- build_model(archs[[cfg$arch]], cfg$l2)
+  fit(model, x = inp_train, 
+      y = y_train, 
+      epochs = cfg$median_epoch,
+      batch_size = BATCH, 
+      shuffle = TRUE, 
+      verbose = 0)
+  model
+  }
+
+final_models <- function(cfg, tag) {
+  lapply(seq_len(N_FINAL_SEEDS), function(s) {
+    m <- fit_final(cfg, seed + s)
+    save_model(m, sprintf("ann_%s_seed%d.keras", tag, s), overwrite = TRUE)
+    m
+    })
+  }
+
+ann_selected_models    <- final_models(ann_selected, "selected")
+ann_sensitivity_models <- final_models(ann_sensitivity, "sensitivity")
+
+# Ensemble prediction: expected claim counts (rate x Exposure), averaged over 
+# 5 different seeds to smooth out the run-to-run variability 
+ann_predict <- function(models, df) {
+  inp <- make_inputs(df)
+  rowMeans(sapply(models, function(m) as.numeric(predict(m, inp, verbose = 0))))
+  }
+
+# In-sample sanity check only (train): calibration should be close to 1
+mu_check <- ann_predict(ann_selected_models, train)
+cat(sprintf("\nTrain calibration (selected ANN ensemble): %.4f\n",
+            sum(mu_check) / sum(train$ClaimNb)))
+
 
 ```
 
