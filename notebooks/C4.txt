@@ -1,0 +1,56 @@
+C4
+The tables below refer to the six chunks in `evaluation_tables_chunks.Rmd`, in order. Finding 5 isn't fully supported yet, because I haven't seen the decile table (Table 6).
+
+| Table | Chunk label | Content |
+|---|---|---|
+| 1 | `tab-test-performance` | Test deviance, log-likelihood, Gini, calibration |
+| 2 | `tab-train-test` | Train vs test deviance and Gini, with gaps |
+| 3 | `tab-complexity` | Coefficients, total leaves, parameters |
+| 4 | `tab-intervals` | Test deviance and calibration with 95% intervals |
+| 5 | `tab-paired` | Paired deviance differences with intervals |
+| 6 | `tab-deciles` | Calibration by predicted-risk decile |
+
+## Finding 1: the ordering is GBM, then ANN, then GLM
+
+- **Point estimates (Table 1):** the selected models score 0.2424 (GBM), 0.2459 (ANN) and 0.2488 (GLM) on deviance, where lower is better. On Gini, where higher is better, they score 0.330, 0.313 and 0.280. The sensitivity rows show the same order (GBM 0.2427, ANN 0.2454), so the result doesn't depend on which configuration you pick.
+- **Inference (Table 5, rows 1 to 4):** the differences are GBM selected vs GLM (−0.0064), ANN selected vs GLM (−0.0029), GBM selected vs ANN selected (−0.0035) and GBM sensitivity vs ANN sensitivity (−0.0027). All four intervals lie entirely below zero, and the first model wins in 100% of resamples.
+- **What the interval means:** it says the ordering is unlikely to be an artefact of which policies landed in this test set. It is not a significance test, and it says nothing about other splits, other datasets or tuning variability. Word it as bootstrap evidence for this test set.
+- **Not part of the claim:** the order of selected against sensitivity within a class flips between the GBM and the ANN, and that is within noise (see Finding 3).
+
+## Finding 2: the gains are modest
+
+- **Size (Table 5):** relative to the deviance values in Table 1, the selected GBM improves on the GLM by 2.6%, the ANN by 1.1%, and the GBM improves on the ANN by 1.4%.
+- **Why the single-model intervals don't separate (Table 4):** each model's deviance interval is about ±0.01 wide, and they overlap heavily (GLM 0.2386 to 0.2627, GBM 0.2339 to 0.2525). The test set holds only about 3,000 claims. The paired intervals are much narrower because every model is scored on the same policies, so the sampling noise cancels. That is why Table 5, not Table 4, is the inferential evidence, and you should say so explicitly. Without that sentence, a reader looking at Table 4 will conclude the models are tied.
+- **Deviance and Gini give different impressions.** Deviance gains look small, while Gini (Table 1) is 18% higher for the GBM than the GLM (0.330 against 0.280) and 12% higher for the ANN. Deviance measures overall fit and Gini measures ranking, so report both rather than choosing the more favourable one.
+
+## Finding 3: the simplicity rule costs nothing detectable
+
+- **Test performance (Table 5, rows 5 and 6):** GBM selected minus GBM sensitivity is −0.0003 (−0.0013 to +0.0003), and ANN selected minus ANN sensitivity is +0.0005 (−0.0002 to +0.0016). Both intervals include zero.
+- **Size of the saving (Table 3):** the selected GBM has 7,200 leaves against 10,788 (33% fewer). The selected ANN has 667 parameters against 13,707 (95% fewer).
+- **The extra complexity doesn't transfer (Table 2):** the sensitivity models fit the training data better (GBM Gini 0.377 against 0.361) but score the same on test (0.329 against 0.330).
+- **Phrase it carefully.** "Indistinguishable" is not "equal". For the ANN, the upper end of the interval (+0.0016) is more than half the ANN's gain over the GLM (0.0029), so the data can't rule out that the simple ANN is meaningfully worse. For the GBM the interval is tighter. The ANN's selection also cost 0.9 standard errors in cross-validated loss, against 0.2 for the GBM, which is a tuning-stage result and belongs in the model-selection subsection.
+
+## Finding 4: overfitting is clearest in discrimination
+
+- **Gini gaps, train minus test (Table 2):** GLM 0.010, ANN selected 0.014, ANN sensitivity 0.018, GBM selected 0.031, GBM sensitivity 0.048.
+- **Deviance gaps:** only 0.0075 to 0.0113 across all five, a much narrower range. The GLM, which can barely overfit, has a gap of 0.0075, so most of the deviance gap reflects the test sample being a somewhat harder draw. Measured against the GLM, the extra gap is about +0.002 and +0.004 for the two GBMs and about +0.001 for the ANNs.
+- **Interpretation:** the more flexible the model, the more its ranking quality drops out of sample, and the GBMs lose the most. Define "overfitting" as the train-test gap, since train metrics are in-sample. Gini has no interval, so differences of a few thousandths shouldn't be interpreted, while the 0.03 to 0.05 gap for the GBMs is large enough to report.
+
+## Finding 5: calibration is acceptable (pending the decile table)
+
+- **What supports it now:** test calibration is 0.971 to 0.984 (Table 1), and every 95% interval contains 1 (Table 4, ranging roughly 0.93 to 1.03).
+- **The common shortfall:** all five models are below 1 by similar amounts, including the GLM, which is exactly calibrated in training. That points to the test sample (claim frequency 0.0753 against 0.0736 in train) and not to any one model. This is an interpretation, not a tested result, and the frequency figures come from your split checks, so state them in the data section of Chapter 3 so the reader can follow.
+- **A weak spot:** intervals of about ±4% mean the test set couldn't detect miscalibration of a few percent. "Every interval contains 1" shows a lack of detected miscalibration, not proof of good calibration.
+- **Open check:** I haven't seen Table 6. Before you write "acceptable throughout", check that the decile ratios aren't systematically off, for example under-prediction in the top decile. If you paste the table, I'll tell you what it supports.
+
+## Chapter 3 or Chapter 4?
+
+Your brief's outline puts Findings after Methodology, so the result tables belong in **Chapter 4**. **Chapter 3** should describe the evaluation without any results: the metric definitions, the complexity measures, the group bootstrap, and the locked-selection protocol. The selected configurations and the full tuning grids can go in Chapter 4 and the appendix respectively.
+
+The word limit changes how many tables you can show, because the brief counts tables in the main-body limit. Appendices aren't assessed, so any claim your argument depends on must be stated in the main text, with its numbers.
+
+- **Keep in the main body:** Table 1, Table 5 and Table 3 (or fold complexity into Table 1 as an extra column). These carry Findings 1 to 3.
+- **Summarise in text, or keep as a short table:** Table 2, because Finding 4 rests on it. Quote the gap numbers in a sentence if you move it.
+- **Candidates for the appendix:** Table 4 (the intervals) and Table 6 (the deciles). State the calibration range and the decile result in a sentence in the main text. Keep the interval widths too, because they justify using paired differences.
+
+When you've checked Table 6, send it to me and I can draft the Chapter 4 results paragraphs in that structure.
