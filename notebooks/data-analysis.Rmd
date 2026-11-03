@@ -1799,7 +1799,184 @@ R_LIME       <- if (PILOT) 3 else 10        # repeated explanations (explainer n
 N_LIME_TRAIN <- 5000                        # training rows the explainers learn distributions from
 LIME_SEED    <- 2030
 
-# Bins defined once from the training data and saved before computing explanations
+# 1. Bins defined once from the training data and saved before computing explanations
+edges_from_bins <- function(x, bin) unname(sort(tapply(x, factor(bin), min))[-1])
+bm <- train$BonusMalusLog
+bm_above <- bm[bm > min(bm)]
+
+bin_edges <- list(
+  DrivAge       = edges_from_bins(train$DrivAge, train$DrivAgeBin),
+  VehAge        = edges_from_bins(train$VehAge,  train$VehAgeBin),
+  BonusMalusLog = c(min(bm_above), quantile(bm_above, c(1/3, 2/3), names = FALSE)),
+  DensityLog    = quantile(train$DensityLog, c(.25, .5, .75), names = FALSE),
+  VehPower      = quantile(train$VehPower,   c(.25, .5, .75), names = FALSE)
+)
+bin_edges <- lapply(bin_edges, function(e) sort(unique(e)))
+
+cutters <- lapply(names(bin_edges), function(f) {
+  e <- bin_edges[[f]]; lab <- paste0(f, "_b", seq_len(length(e) + 1))
+  function(x) cut(x, c(-Inf, e, Inf), labels = lab, right = FALSE)
+})
+names(cutters) <- names(bin_edges)
+
+reps <- lapply(names(cutters), function(f) {
+  r <- tapply(train[[f]], cutters[[f]](train[[f]]), median)
+  # representative raw value of each bin
+  setNames(as.numeric(r), names(r)) 
+})
+names(reps) <- names(cutters)
+
+bin_table <- do.call(rbind, lapply(names(cutters), function(f) {
+  e <- c(-Inf, bin_edges[[f]]); sh <- as.numeric(prop.table(table(cutters[[f]](train[[f]]))))
+  data.frame(feature = f, bin = names(reps[[f]]), lower_edge = e,
+             share_of_train = round(sh, 3), representative = reps[[f]], row.names = NULL)
+}))
+cat("Option C bins (review before continuing):\n"); print(bin_table)
+saveRDS(list(edges = bin_edges, reps = reps, table = bin_table, created_at = Sys.time()),
+        paste0("lime_bins_option_C", RUN_TAG, ".rds"))
+
+# 2. The 3 lime spaces: How a policy is captured into LIME, 
+# and how LIME output is mapped back into the model
+z_mu <- colMeans(train[continuous_features])
+z_sd <- sapply(train[continuous_features], sd)
+spaces <- list(
+  C = list(to = function(df) { 
+    for (f in names(cutters)) 
+      df[[f]] <- cutters[[f]](df[[f]]); df 
+    },
+    from = function(df) { 
+      for (f in names(cutters))
+        df[[f]] <- as.numeric(reps[[f]][as.character(df[[f]])]); df }),
+  A = list(to = function(df) df, from = function(df) df),
+  D = list(to = function(df) { for (f in continuous_features)
+             df[[f]] <- (df[[f]] - z_mu[[f]]) / z_sd[[f]]; df },
+           from = function(df) { for (f in continuous_features)
+             df[[f]] <- df[[f]] * z_sd[[f]] + z_mu[[f]]; df })
+)
+
+# lime needs a model class with two methods
+model_type.lograte_model    <- function(x, ...) "regression"
+predict_model.lograte_model <- function(x, newdata, type, ...) {
+  data.frame(Response = x$predict(as.data.frame(newdata)))
+}
+registerS3method("model_type",    "lograte_model", model_type.lograte_model,    envir = asNamespace("lime"))
+registerS3method("predict_model", "lograte_model", predict_model.lograte_model, envir = asNamespace("lime"))
+
+make_lime_model <- function(model_name, scheme) {
+  structure(list(predict = function(d) expl_fns[[model_name]](spaces[[scheme]]$from(d))),
+            class = "lograte_model")
+}
+
+set.seed(LIME_SEED)
+lime_train_raw <- train[sample.int(nrow(train), N_LIME_TRAIN), feats]
+make_explainer <- function(scheme, mdl) {
+  tr <- spaces[[scheme]]$to(lime_train_raw)
+  switch(scheme,
+         # features are already binned factors
+         C = lime::lime(tr, mdl, bin_continuous = FALSE),   
+         A = lime::lime(tr, mdl, bin_continuous = TRUE, n_bins = 4, quantile_bins = TRUE),
+         D = lime::lime(tr, mdl, bin_continuous = FALSE))
+}
+
+lime_weights <- function(expl, x_sp, seed) {
+  set.seed(seed)
+  out <- lime::explain(x_sp, expl, n_features = length(feats), n_permutations = N_PERM,
+                       feature_select = "none")
+  w <- matrix(NA_real_, nrow(x_sp), length(feats), dimnames = list(NULL, feats))
+  w[cbind(match(as.character(out$case), rownames(x_sp)), match(out$feature, feats))] <-
+    out$feature_weight
+  r2 <- tapply(out$model_r2, out$case, mean)[rownames(x_sp)]
+  list(w = w, r2 = as.numeric(r2))
+}
+
+# 3. Run LIME, Fidelity, and Stability
+lime_rows <- list(); lime_w1 <- list()
+for (scheme in c("C", "A", "D")) {
+  for (m in LIME_MODELS) {
+    cat(sprintf("LIME scheme %s, model %s\n", scheme, m))
+    ex <- tryCatch(make_explainer(scheme, make_lime_model(m, scheme)),
+                   error = function(e) { 
+                     message("  explainer failed: ",
+                             conditionMessage(e)); NULL })
+    if (is.null(ex)) next
+    x_sp <- spaces[[scheme]]$to(lime_df); 
+    rownames(x_sp) <- as.character(seq_len(nrow(x_sp)))
+    runs <- tryCatch(lapply(seq_len(R_LIME), 
+                            function(r) lime_weights(ex, x_sp, LIME_SEED + r)),
+                     error = function(e) { message("  explain failed: ",
+                                                   conditionMessage(e)); NULL })
+    if (is.null(runs)) next
+
+    faith_cor <- NA_real_
+    # attributions are comparable to feature removal only for binned schemes
+    if (scheme %in% c("C", "A")) {   
+      pf <- function(d) expl_fns[[m]](spaces[[scheme]]$from(d))
+      fc <- faithfulness(pf, x_sp, spaces[[scheme]]$to(bg_main), runs[[1]]$w)
+      faith_cor <- mean(fc$cor, na.rm = TRUE)
+    }
+    st <- stability_metrics(lapply(runs, `[[`, "w"))
+    lime_rows[[paste(scheme, m)]] <- cbind(scheme = scheme, model = m,
+                                           lime_r2 = mean(sapply(runs, function(r) 
+                                             mean(r$r2, na.rm = TRUE))),
+                                           lime_faith_cor = faith_cor, st)
+    lime_w1[[paste(scheme, m)]] <- runs[[1]]$w
+  }
+}
+lime_summary <- do.call(rbind, lime_rows); 
+rownames(lime_summary) <- NULL
+cat("\nLIME summary (explainer-noise stability; 
+    D weights are per standard deviation):\n")
+print(lime_summary[, c("scheme", "model", "lime_r2", "lime_faith_cor", 
+                       "global_rank_cor", "top3_overlap", "local_rank_cor", 
+                       "rel_sd", "sign_agreement")], digits = 3)
+
+# Do conclusions survive a change of binning? (rows = scheme, columns = model)
+cat("\nLocal rank correlation by scheme and model:\n")
+print(round(with(lime_summary, tapply(local_rank_cor, list(scheme, model), identity)), 3))
+cat("\nLIME surrogate R2 by scheme and model:\n")
+print(round(with(lime_summary, tapply(lime_r2, list(scheme, model), identity)), 3))
+
+# 4. Summaries
+
+res_file <- "final_evaluation_results.rds"
+if (file.exists(res_file)) {
+  ev   <- readRDS(res_file)
+  perf <- ev$metrics[ev$metrics$set == "test", c("model", "deviance", "gini")]
+  cx   <- ev$complexity[, c("model", "measure", "value")]
+  primary_lime <- lime_summary[lime_summary$scheme == "C", 
+                               c("model", "lime_r2", "lime_faith_cor")]
+  rq1 <- Reduce(function(a, b) merge(a, b, by = "model", all.x = TRUE),
+                list(perf, cx, shap_faith_summary[, c("model", "faith_cor", 
+                                                      "faith_rmse")], primary_lime))
+  rq1 <- rq1[match(names(expl_fns), rq1$model), ]
+  rownames(rq1) <- NULL
+  cat("\nRQ1: performance and explanation fidelity (LIME columns use option C):\n")
+  print(rq1, digits = 4)
+
+  op <- par(mar = c(4.5, 4.5, 1, 1))
+  plot(rq1$deviance, 
+       rq1$faith_cor, 
+       pch = 19, 
+       xlab = "Test deviance (lower is better)",
+       ylab = "SHAP faithfulness (correlation)", 
+       xlim = rev(range(rq1$deviance)) )
+  text(rq1$deviance, rq1$faith_cor, rq1$model, pos = 3, cex = 0.8)
+  par(op)
+} else {
+  rq1 <- NULL
+  warning(res_file, " not found in ", 
+          getwd(), ": RQ1 table skipped.")
+}
+
+cat("\nRQ3: SHAP stability under data resampling (axis 2):\n"); 
+print(stab_axis2, digits = 3)
+
+saveRDS(list(lime_summary = lime_summary, lime_weights_first_run = lime_w1,
+             bin_table = bin_table, rq1 = rq1, rq3 = stab_axis2,
+             settings = list(N_PERM = N_PERM, R_LIME = R_LIME, LIME_MODELS = LIME_MODELS,
+                             LIME_SEED = LIME_SEED),
+             created_at = Sys.time()),
+        paste0("explain_lime_and_summary", RUN_TAG, ".rds"))
 
 ```
 
