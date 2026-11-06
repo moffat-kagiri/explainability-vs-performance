@@ -1,0 +1,2144 @@
+---
+output: word_document
+lang: en-GB
+editor_options: 
+  markdown: 
+    wrap: sentence
+bibliography: references.bib
+---
+
+# Chapter 3: Methodology
+
+## Research Design
+
+The literature review concludes that SHAP sensitivity is a reliable marker of model risk in predictive models.
+This chapter examines the co-variation of explanation fidelity with predictive performance and the variation of SHAP sensitivity across model classes.
+This way, this chapter provides reliable findings which are presented in chapter 4, and builds the empirical foundation for the discussion and conclusions drawn in chapter 5.
+The methodology is structured to reliably answer the research questions raised in this study as follows:
+
+- **RQ1. Predictive performance and explanation fidelity:** In the model specification and evaluation framework sections, the performance of each model class is measured through the mean Poisson deviance, log-likelihood, and Gini coefficient. The explainability section calculates fidelity, which the study measures through faithfulness correlation, SHAP attribution, and LIME surrogate $R^2$.
+- **RQ2: Selection framework:** This framework is built in the synthesis in chapter 5, using the outputs that satisfy the other two questions. It weighs model selection on the respective scores on complexity, predictive performance, and explanation fidelity and stability.
+- **RQ3: Explanation model risk:** Explanation stability is assessed in the different model classes using explainer noise, data sensitivity, sign agreement, and other ratios described below. These measurements are taken by refitting each of the models on resampled data, and comparing the attributions for the same policies.
+
+## Dataset
+
+It is recommended to use find-able, accessible, interoperable, and reproducible (FAIR) data, which aligns to acceptable data integrity and reproducibility standards [@wilkinson2016].
+These standards facilitate reliable and replicable findings in actuarial research [@luteijn2025].
+This study uses `freMTPL2freq`, the French Motor Third-Party Claims dataset, easily accessible through the CASdatasets R package published in 2015 as the companion package for the Computational Actuarial Science with R textbook [@noll2018].
+The data pack consists of 677,991 rows of third party liability covers observed between 2011 and 2013.
+It has 12 variables that detail the claim frequency component of third-party policies in an anonymous French insurer, including policy unique identifiers, exposures, area/location variables, drivers’ age, bonus-malus level, and vehicle specifications.
+
+```{r setup, include = FALSE, echo = FALSE}
+knitr::opts_chunk$set(
+  dpi = 600,
+  out.width = "100%",
+  fig.width = 7.5,
+  fig.height = 4.5,
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+require(MASS)
+require(tidyverse)
+require(dplyr)
+require(ggplot2)
+require(gridExtra)
+require(patchwork)
+require(sf)
+require(rnaturalearth)
+require(rnaturalearthhires)
+require(stringi)
+require(plotly)
+require(shapr)
+require(lime)
+
+# Import the dataset
+require(CASdatasets)
+?CASdatasets
+ 
+data(freMTPL2freq)
+
+#preview  
+glimpse(freMTPL2freq)
+
+## Missing Values
+freMTPL2freq %>%
+ summarise(across(everything(), ~sum(is.na(.))))
+```
+
+### EDA and Preprocessing
+
+After importing the dataset, it is pre-processed, starting with a check for missing values and duplicates which reveals no missing values or duplicate rows.
+However, it contains 1,224 policies having exposures that exceed 1.
+The study caps the exposures at 1 and verifies that it has no nil or negative exposures.
+
+```{r EDA-feature-preprocessing, eval=TRUE, include=TRUE, echo=FALSE}
+## Data Cleaning and Feature Preprocessing
+
+### 1. Audit duplicates
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    duplicate_count = sum(duplicated(IDpol), na.rm = TRUE),
+    duplicate_pct = mean(duplicated(IDpol), na.rm = TRUE)*100
+  )
+
+### 2. Exposures preprocessing and cap at 1
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_1 = sum(Exposure>1, na.rm = TRUE),
+    pct_exceeding_1 = mean(Exposure>1, na.rm = TRUE)*100
+  )
+
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(Exposure = pmin(Exposure, 1, na.rm = FALSE))
+
+sum(freMTPL2freq$Exposure>1, na.rm = TRUE)
+
+### 3. Exposures less than 1 day
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    zero_exposure = sum(Exposure <= 0, na.rm = TRUE),
+    pct_zero_exposure = mean(Exposure <= 0, na.rm = TRUE)*100
+  )
+
+### 4. Remove unique identifiers
+IDpol <- freMTPL2freq$IDpol
+freMTPL2freq <- freMTPL2freq %>%
+  select(-IDpol)
+
+### 5. Claim Frequency Check
+freMTPL2freq %>%
+  summarise(
+    policy_count = n(),
+    policies_exceeding_4 = sum(ClaimNb>4, na.rm = TRUE),
+    pct_exceeding_4 = mean(ClaimNb>4, na.rm = TRUE)*100
+  )
+```
+
+The variable of bonus/malus ranges between 50 and 350 and is a coefficient that reflects a driver's claim history.
+In `freMTPL2freq`, this variable has a maximum of 230.
+Considering the learning approach in GLMs and the feature representation in GBMs and ANNs, it is appropriate to re-scale this variable to have a neutral baseline of 1 rather than 100.
+In addition, to temper the effect of extreme values assigned to risky drivers which may destabilise the predictive model, the study Winsorizes `BonusMalus`, capping it at the 99.9th percentile and then log-transforms it [@he].
+
+```{r EDA-preprocessing-continued, eval=TRUE, include=TRUE, echo = FALSE}
+
+### 6. BonusMalus preprocessing and cap at 99.9th percentile
+summary(freMTPL2freq$BonusMalus)
+cap_threshold <- quantile(freMTPL2freq$BonusMalus, 0.999, na.rm = TRUE)
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(
+    # Cap
+    BonusMalus = pmin(BonusMalus, cap_threshold, na.rm = TRUE),    
+    
+    # Log Transform
+    BonusMalusLog = log(BonusMalus),
+    
+    # Convert to multiplicative factor
+    BonusMalus = BonusMalus/100
+  )
+
+freMTPL2freq %>%
+  summarise(
+    min_BonusMalus = min(BonusMalus),
+    mean_BonusMalus = mean(BonusMalus),
+    max_BonusMalus = max(BonusMalus)
+  )
+
+### 7. Binning DrivAge and VehAge, and log transform Density
+
+freMTPL2freq <- freMTPL2freq %>%
+  mutate(
+    DrivAgeBin = cut(DrivAge, 
+                     breaks = c(17, 21, 26, 31, 41, 51, 71,100), 
+                     labels=c("18-20", "21-25", "26-30", "31-40", 
+                              "41-50", "51-70", "70+")
+                     ),
+    VehAgeBin = cut(VehAge,
+                    breaks = c(-1, 1, 3, 5, 10, 100),
+                    labels = c("0-1", "2-3", "4-5", "6-10", "11+")
+                    ),
+    DensityLog = log(Density)
+  )
+
+# Fingerprint Check
+d <- freMTPL2freq
+dput(list(fp = c(n = nrow(d), 
+                 claims = sum(d$ClaimNb), 
+                 exposure = sum(d$Exposure), 
+                 drivage = mean(d$DrivAge)),
+          dr_levels = levels(d$DrivAgeBin), 
+          veh_levels = levels(d$VehAgeBin)))
+```
+
+Exposure is not a feature, but an offset or normalizing weight.
+In essence, two policies with exposures of 0.3 and 0.8 but with 2 claims each represent vastly different claim rates.
+The graphs plotted below show how the exposure-adjusted claim rate varied against the features identified as most significant by Noll et.
+al., that is, the vehicle age, driver age, and bonus/malus.
+
+```{r EDA-distribution-by-VehAge-and-DrivAge, eval = TRUE, include = TRUE, echo = FALSE}
+## Plot: Vehicle age and driver age without binning, show why binning is necessary
+
+driver_rate <- freMTPL2freq %>%
+  group_by(DrivAge) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_rate = total_claims / total_exposure,
+    .groups = "drop"
+  )
+
+vehicle_rate <- freMTPL2freq %>%
+  group_by(VehAge) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_rate = total_claims / total_exposure,
+    .groups = "drop"
+  )
+
+plot_driver <- ggplot(driver_rate, aes(x = DrivAge, y = claim_rate)) +
+  geom_line(color = "#0284c7", size = 1) +
+  labs(
+    title = "Claim Frequency by Driver Age",
+    x = "Driver Age (DrivAge)",
+    y = "Claim Rate (Claims / Exposure)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(color = "#0369a1", face = "bold"),
+    axis.title = element_text(color = "#475569")
+  )
+
+plot_vehicle <- ggplot(vehicle_rate, aes(x = VehAge, y = claim_rate)) +
+  geom_line(color = "#38bdf8", size = 1) +
+  labs(
+    title = "Claim Frequency by Vehicle Age",
+    x = "Vehicle Age (VehAge)",
+    y = "Claim Rate (Claims / Exposure)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(color = "#0369a1", face = "bold"),
+    axis.title = element_text(color = "#475569")
+  )
+
+#Render side-by-side
+grid.arrange(plot_driver, plot_vehicle, ncol = 2)
+```
+
+According to Goldburd et.
+al., having too many parameters on a model risks it overfitting the data.
+However, giving it too few risks losing critical variations in the portfolio's risk profile.
+The distribution of claim frequency with age creates a u-shaped curve and would lead to underfitting in GLMs.
+As such, `DrivAgeBin` and `VehAgeBin` are created as binned alternatives for GLM while the continuous versions are maintained for GBM and ANN because they can detect the non-linearity.
+
+```{r EDA-claim-frequency-drivers, eval=TRUE, include=TRUE, echo = FALSE}
+# Background Aggregation
+
+### Vehicle age summary (binned)
+veh_age <- freMTPL2freq %>%
+  group_by(VehAgeBin) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+### Driver age summary (binned)
+driv_age <- freMTPL2freq %>%
+  group_by(DrivAgeBin) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+### Bonus/Malus summary (continuous) 
+bon_mal <- freMTPL2freq %>%
+  group_by(BonusMalus = round(BonusMalus, 2)) %>%
+  summarise(freq = sum(ClaimNb)/sum(Exposure), .groups = "drop")
+
+#Visualization
+## Plot 1: Vehicle Age 
+p1 <- ggplot(veh_age, aes(x = VehAgeBin, y = freq)) + 
+  geom_col(fill = "#87CEEB", color = "#4A7A96", width = 0.6) + 
+  theme_minimal() + labs(title = "Vehicle Age Profile", 
+                         x = "Binned Vehicle Age",
+                         y = "Claim Frequency")
+
+## Plot 2: Driver Age 
+p2 <- ggplot(driv_age, aes(x = DrivAgeBin, y = freq)) + 
+  geom_col(fill = "#87CEEB", color = "#4A7A96", width = 0.6) + 
+  theme_minimal() + 
+  labs(title = "Driver Age Profile", x = "Binned Driver Age", y = "Claim Frequency")
+
+## Plot 3: Bonus Malus Risk Curve
+p3 <- ggplot(bon_mal, aes(x=BonusMalus, y=freq)) +
+  geom_line(color = "#87CEEB", size = 1.2) +
+  geom_point(color = "#4A7A96", size = 1.5) + 
+  theme_minimal() +
+  labs(title = "Bonus/Malus Risk Curve",x = "Rescaled Bonus Malus", 
+       y = "Claim Frequency")
+
+## Combine 3 plots into 1 grid
+(p1+p2)/(p3+plot_spacer()) + 
+  plot_annotation(title = "Exploratory Data Analysis: Claim Frequency Drivers", 
+                  theme = theme(plot.title = element_text(face = "bold", size = 14)))
+
+```
+
+As the map below demonstrates, the widely varying exposure-adjusted claim frequency alludes to the significance of the region of residence in determining the insurance risk in a given policy.
+
+```{r EDA-mapped-regions, eval=TRUE, include=TRUE, echo = FALSE}
+# Download department-level boundary vectors
+france_departments <- ne_states(country = "france", returnclass = "sf") %>%
+  #Remove overseas territories
+  filter(!name %in% c("Guyane française", "Guadeloupe", "Martinique", 
+                      "Mayotte", "La Réunion"))%>%
+  # mutate(dept_code = substr(gn_a1_code, 3, 4)) (breaks the extraction for 
+  # continental departments based on their prefixes)
+  mutate(dept_code = stringr::str_replace(gn_a1_code, "^FR\\.", ""))
+
+# Dissolve department geometries into the historic regions
+# Departments into pre 2016 regions
+historic_bridge <- tibble(
+  dept_code = c(
+    "01", "07", "26", "38", "42", "69", "73", "74", # Rhône-Alpes
+    "03", "15", "43", "63",                         # Auvergne
+    "02", "60", "80",                               # Picardie
+    "59", "62",                                     # Nord-Pas-de-Calais
+    "24", "33", "40", "47", "64",                   # Aquitaine
+    "19", "23", "87",                               # Limousin
+    "16", "17", "79", "86",                         # Poitou-Charentes
+    "14", "50", "61",                               # Basse-Normandie
+    "27", "76",                                     # Haute-Normandie
+    "21", "58", "71", "89",                         # Bourgogne
+    "25", "39", "70", "90",                         # Franche-Comté
+    "11", "30", "34", "48", "66",                   # Languedoc-Roussillon
+    "09", "12", "31", "32", "46", "65", "81", "82", # Midi-Pyrénées
+    "67", "68",                                     # Alsace
+    "08", "10", "51", "52",                         # Champagne-Ardenne
+    "54", "55", "57", "88",                         # Lorraine
+    "22", "29", "35", "56",                         # Bretagne (Unchanged)
+    "18", "28", "36", "37", "41", "45",             # Centre
+    "75", "77", "78", "91", "92", "93", "94", "95", # Île-de-France (Unchanged)
+    "44", "49", "53", "72", "85",                   # Pays de la Loire (Unchanged)
+    "04", "05", "06", "13", "83", "84",             # Provence-Alpes-Côte d'Azur (Unchanged)
+    "2A", "2B",                                     # Corse (Unchanged)
+    "22", "29", "35", "56"                          # Fr-m (Double check template mapping codes)
+  ),
+  Historic_Region = c(
+    rep("Rhone-Alpes", 8), rep("Auvergne", 4), rep("Picardie", 3), rep("Nord-Pas-de-Calais", 2),
+    rep("Aquitaine", 5), rep("Limousin", 3), rep("Poitou-Charentes", 4), rep("Basse-Normandie", 3),
+    rep("Haute-Normandie", 2), rep("Bourgogne", 4), rep("Franche-Comté", 4), 
+    rep("Languedoc-Roussillon", 5), rep("Midi-Pyrénées", 8), rep("Alsace", 2),
+    rep("Champagne-Ardenne", 4), rep("Lorraine", 4), rep("Bretagne", 4), rep("Centre", 6),
+    rep("Île-de-France", 8), rep("Pays de la Loire", 5),
+    rep("Provence-Alpes-Côte d'Azur", 6), rep("Corse", 2), rep("Bretagne", 4)
+  )
+)
+
+france_departments <- france_departments %>%
+  mutate(dept_code = case_when(
+    name =="Corse-du-Sud" ~ "2A",
+    name =="Haute-Corse" ~ "2B",
+    TRUE ~ dept_code
+  ))
+
+historic_regions_map <- france_departments%>%
+  left_join(historic_bridge, by = "dept_code") %>%
+  filter(!is.na(Historic_Region))%>%
+  group_by(Historic_Region)%>%
+  summarise(geometry = st_union(geometry), .groups = "drop")%>%
+  mutate(clean_map_region = tolower(trimws(Historic_Region)))%>%
+  mutate(clean_map_region = iconv(clean_map_region, to = "ASCII//TRANSLIT"))%>%
+  # Patch for dropped hyphens
+  mutate(clean_map_region = case_when(
+    str_detect(clean_map_region, "provence") ~ "provence-alpes-cotes-d'azur",
+    str_detect(clean_map_region, "loire") ~ "pays-de-la-loire",
+    TRUE ~ clean_map_region
+  ))
+
+# Background data aggregation 
+region_claims <- freMTPL2freq%>%
+  group_by(Region) %>%
+  summarise(
+    total_claims = sum(ClaimNb, na.rm = TRUE),
+    total_exposure = sum(Exposure, na.rm = TRUE),
+    claim_frequency = total_claims/total_exposure,
+    .groups = "drop"
+  ) %>%
+  #Standardize region names
+  mutate(clean_data_region = tolower(trimws(Region)))%>%
+  mutate(clean_data_region = iconv(clean_data_region, to = "ASCII//TRANSLIT"))
+
+# Attach raw total claims onto geometry nodes
+mapdata <- historic_regions_map %>%
+  left_join(region_claims, by = c("clean_map_region" = "clean_data_region"))
+
+# Render total claims
+#ggplot(data = mapdata) + 
+# geom_sf(aes(fill = total_claims), color = "white", size = 0.2) +
+#  scale_fill_gradient(low = "#E0F7FA", high = "#0288D1", name = "Total Claim Count",
+#                      labels = scales::label_comma(), na.value = "#ECEFF1") +
+#  theme_void() + 
+#  theme(
+#    plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+#    legend.position = "right"
+#  ) +
+# labs(title = "Geographic Heatmap: Distribution of Total Claims by Region")
+
+# Render
+ggplot(data = mapdata) + 
+ geom_sf(aes(fill = claim_frequency), color = "white", size = 0.2) +
+  scale_fill_gradient(low = "#E0F7FA", high = "#0288D1", name = "Claim Frequency per Region",
+                      labels = scales::label_comma(), na.value = "#ECEFF1") +
+  theme_void() + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5), 
+    legend.position = "right"
+  ) +
+ labs(title = "Geographic Heatmap: Claim Frequency by Region") +
+  geom_sf_text(aes(label = Region), size = 2, color = "black", check_overlap = TRUE)
+```
+
+### Train/Test Split
+
+A fair measure of the predictive accuracy needs to cover all levels of risk.
+In the case of this analysis, the majority of policies have no claims for the year they were observed in.
+As such, a simple random split may end up having a disproportionate amount of zeros to actual claim counts.
+To prevent this, a stratified split is carried out, based on claim occurrence.
+This is achieved below by starting with a binary indicator `HasClaim`.
+
+```{r duplication-validation, eval=FALSE, echo=TRUE}
+# One string per covariate profile 
+key_train <- do.call(paste, c(train[all_features], sep = "|"))
+key_test  <- do.call(paste, c(test[all_features],  sep = "|"))
+
+# 1. Portion of TEST rows whose covariate profile also appears in TRAIN
+mean(key_test %in% key_train)
+
+# 2. Portion of TRAIN rows that have at least one identical-profile sibling in train
+mean(duplicated(key_train) | duplicated(key_train, fromLast = TRUE))
+```
+
+The study uses a 90-10 ratio of the train to test data.
+It reviews the split after further assessment during hyperparameter tuning to treat policies with identical covariates as one group.
+This minimises leakage and the resulting advantage of small leaves in the GBM.
+This leakage flatters the test deviance as the models would train on identical models to the ones they are tested on.
+This makes a covariate-profile-conscious approach in splitting the dataset.
+As such, this split provides 610,246 policies in the training portion and leaves 67,745 for the test data.
+
+```{r freMTPL2freq-Split, eval = FALSE, include = FALSE, echo = FALSE}
+# Data Split set to eval = FALSE to prevent a repeated split
+require(rsample)
+
+profile_columns <- c("VehPower", "VehAge", "DrivAge", "BonusMalus", "VehBrand", 
+                     "VehGas", "Area", "Density", "Region")
+
+key <- do.call(paste, c(freMTPL2freq[profile_columns], sep = "|"))
+grp <- match(key, unique(key))
+
+set.seed(2026)
+all_groups <- unique(grp)
+test_groups <- sample(all_groups, round(0.10*length(all_groups)))
+
+is_test <- grp %in% test_groups
+
+train <- freMTPL2freq[!is_test, ]
+test <- freMTPL2freq[is_test, ]
+
+# Save Split
+saveRDS(which(is_test), "test_set.rds")
+
+mean(is_test)                                          
+mean(key[is_test] %in% key[!is_test])                  # Should be 0
+c(train = sum(train$ClaimNb) / sum(train$Exposure),    # frequencies should be close
+  test  = sum(test$ClaimNb)  / sum(test$Exposure))
+max(table(grp))                                        # largest group size
+
+```
+
+## Model Specifications
+
+Having established the shape and distribution of claim occurrences in the dataset, the study trains a GLM, a GBM, and an ANN to make pricing algorithms for the purpose of examining the explainability-performance frontier in insurance pricing.
+
+### Generalized Linear Model
+
+The study specifies a Poisson GLM with a log link function.
+Ohlsson and Johansson, (2010) posit that this type of GLMs ensures positive claim predictions and prevents the underpricing of risks as a result of the asymmetry of insurance data.
+The log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter, ensuring that it is easy to determine the standard errors or confidence intervals.
+Besides binning the age variables, `Density` and `BonusMalus` are log-transformed to linearise their multiplicative interaction with insurance risk.
+This makes them easier to fit with a GLM, and reduces the effect of outliers.
+
+The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage.
+While the GLM is backed by a sound mathematical foundation, the choices discussed here are made quite arbitrarily and there is literature backing alternative approaches.
+As such, these choices carry the illusion of arbitrariness discussed in chapter 2.
+
+```{r GLM-setup, eval = FALSE, include = FALSE, echo = FALSE}
+glm_formula <- ClaimNb ~ offset(log(Exposure)) + VehPower + DrivAgeBin + VehAgeBin +
+  BonusMalusLog + VehBrand + VehGas + Area + DensityLog + Region
+
+glm_freq <- glm(glm_formula,
+                family = poisson(link = log), 
+                data = train)
+
+summary(glm_freq)
+
+# CV for comparison with GBM and ANN
+glm_cv <- sapply(folds, function(test_set) {
+  fit <- glm(glm_formula, 
+             family = poisson(link = log), 
+             data = train[-test_set, ])
+  mu <- predict(fit, newdata = train[test_set,], 
+                type = "response")
+  # Calculate Poisson NLL
+  mean(mu - train$ClaimNb[test_set]*log(mu))
+})
+
+# CV Results
+c(mean = mean(glm_cv), sd(glm_cv)/sqrt(length(glm_cv)))
+
+```
+
+### Gradient Boosting Machine
+
+A GBM is defined with a Poisson objective and an exposure offset to model claim frequency.
+The study specifies a LightGBM over classic GBM or XGBoost because it converges faster with much lower loss and higher accuracy.
+LightGBM achieves this through leaf-wise growth.
+It uses less memory and executes its decision cuts faster.
+LightGBM also handles categorical variables natively, using a partition mechanism based on Fisher (1958) that ranks the categories based on their contributions to the residual errors of the model.
+
+```{r initial-LightGBM-Tuning, eval=FALSE, include=FALSE, echo = FALSE}
+require(lightgbm)
+
+seed <- 42
+k_folds <- 5
+lr <- 0.05
+nrounds <- 3000
+
+# --- Data import and structuring ---
+continuous_features <- c("VehPower", "DrivAge", "VehAge", "BonusMalusLog","DensityLog")
+categorical_features <- c("VehBrand", "VehGas", "Area", "Region")
+all_features <- c(continuous_features, categorical_features)
+
+# Store and reuse train levels for the test
+cat_levels <- lapply(train[categorical_features], function(x) levels(as.factor(x)))
+prep_matrix <- function(df) {
+  out <- df[, all_features]
+  for (v in categorical_features) {
+    out[[v]] <- match(as.character(out[[v]]), cat_levels[[v]]) - 1L
+  }
+  as.matrix(out)
+}
+
+train_matrix <- prep_matrix(train)
+
+# Train model, 
+lightgbm_train <- lgb.Dataset(
+  data                  = train_matrix, 
+  label                 = train$ClaimNb,         # Target variable
+  init_score            = log(train$Exposure),   # Offset
+  categorical_feature   = categorical_features,  # Explicit indication
+  params                = list(features_pre_filter = FALSE) # Vary min_data_in_leaf
+)
+
+# Using the same folds for every configuration to stabilise differences in score
+make_folds <- function(y, k, seed) {
+  set.seed(seed)
+  strata <- as.integer(y>0)
+  fold_id <- integer(length(y))
+  for (s in unique(strata)) {
+    idx <- which(strata == s)
+    fold_id[idx] <- sample(rep_len(seq_len(k), length(idx)))
+  }
+  lapply(seq_len(k), function(f) which(fold_id == f))
+}
+
+folds <- make_folds(train$ClaimNb, k_folds, seed)
+
+# Hyperparameter tuning
+# De-center depth, focus on the number of leaves
+grid_search <- expand.grid(
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
+)
+
+# grid_search <- subset(grid_search, num_leaves <=2^max_depth)
+
+base_params <- list(
+  objective          = "poisson",
+  metric             = "poisson",  # Poisson Negative log-likelihood
+  max_depth          = -1,
+  learning_rate      = lr, 
+  seed               = seed,
+  num_threads        = 2,
+  deterministic      = TRUE,       # Reproducible results
+  force_row_wise     = TRUE,
+  verbose            = -1
+)
+
+# Grid search
+results <- vector("list", nrow(grid_search))
+
+for(i in seq_len(nrow(grid_search))) {
+  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
+  params <- c(base_params, as.list(grid_search[i, ]))
+
+  cv <- lgb.cv(
+    params                = params,
+    data                  = lightgbm_train,
+    nrounds               = nrounds,
+    folds                 = folds,
+    early_stopping_rounds = 50, 
+    verbose               = -1
+  )
+  
+  history <- unlist(cv$record_evals$valid$poisson$eval)
+  best_iter <- cv$best_iter
+  if(is.null(best_iter)||length(best_iter) == 0||best_iter < 1)
+     best_iter <- which.min(history)
+  best_loss <- history[best_iter]
+  err_hist <- unlist(cv$record_evals$valid$poisson$eval_err)
+  best_sd <- if (length(err_hist) >= best_iter) err_hist[best_iter] else NA_real_
+  
+  cat(sprintf(" trees: %d | CV Poisson NLL: %.5f\n",best_iter, best_loss))
+  
+  # Organised results in summary tracker
+  results[[i]] <- data.frame(
+    grid_search[i, ],
+    best_trees  = best_iter,
+    valid_nll   = best_loss,
+    hit_cap     = best_iter>=nrounds,
+    valid_se    = best_sd/sqrt(k_folds)
+  )
+}
+
+grid_results <- do.call(rbind, results)
+grid_results <- grid_results[order(grid_results$valid_nll), ]
+rownames(grid_results) <- NULL
+
+cat("\nAll configurations, best first: \n")
+print(grid_results, digits = 5)
+
+print("Top Structural Layouts: ")
+print(head(grid_results, 5))
+
+best <- grid_results[1, ]
+cat(sprintf("\nBest num_leaves = %d (grid %d-%d), min_data_in_leaf = %d (grid %d-%d)\n",
+            best$num_leaves, min(grid_search$num_leaves), 
+            max(grid_search$num_leaves),best$min_data_in_leaf,
+            min(grid_search$min_data_in_leaf), max(grid_search$min_data_in_leaf)
+            ))
+
+if (best$num_leaves %in% range(grid_search$num_leaves)||
+    best$min_data_in_leaf %in% range(grid_search$min_data_in_leaf)) {
+  cat("Best configuration is on the grid edge: consider extending the grid.\n")
+}
+if (any(grid_results$hit_cap)) {
+  cat("Some runs hit NROUNDS: raise it.\n")
+}
+
+
+```
+
+Hyperparameter tuning helps to find the best configuration of a model to optimize its predictive performance on unseen data.
+This study tunes `num_leaves` and `min_data_in_leaf` in the GBM.
+Early attempts at tuning reveal that tuning `max_depth` is redundant as LightGBM grows leaf-wise, and it keeps `num_leaves` below 2\^`max_depth`.
+Setting `max_depth = -1` removes this redundancy.
+The alternative to this approach would be resorting to a random search, which is backed by Bergstra and Bengio, (2012).
+However, this would introduce more arbitrariness, add to the run-to-run randomness in the model, and potentially distract from the main discourse of this paper.
+Instead, a judgement call is made opting for a 7\*7 grid which made for a deterministic and reproducible approach to modelling claim frequency.
+
+```{r grid-search, eval=FALSE, echo=TRUE}
+grid_search <- expand.grid(
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
+)
+```
+
+While training the model and tuning, the study uses five-fold cross validation with fixed folds.
+This ensures that the differences in scores can only be attributed to the parameters specified and not to fold noise.
+
+```{r LightGBM-tuning, eval = FALSE, include = FALSE, echo = FALSE}
+require(lightgbm)
+
+seed <- 42
+k_folds <- 5
+lr <- 0.05
+nrounds <- 3000
+
+# --- Data import and structuring ---
+continuous_features <- c("VehPower", "DrivAge", "VehAge", "BonusMalusLog","DensityLog")
+categorical_features <- c("VehBrand", "VehGas", "Area", "Region")
+all_features <- c(continuous_features, categorical_features)
+
+# Store and reuse train levels for the test
+cat_levels <- lapply(train[categorical_features], function(x) levels(as.factor(x)))
+prep_matrix <- function(df) {
+  out <- df[, all_features]
+  for (v in categorical_features) {
+    out[[v]] <- match(as.character(out[[v]]), cat_levels[[v]]) - 1L
+  }
+  as.matrix(out)
+}
+
+train_matrix <- prep_matrix(train)
+
+# Train model, 
+lightgbm_train <- lgb.Dataset(
+  data                  = train_matrix, 
+  label                 = train$ClaimNb,                    # Target variable
+  init_score            = log(train$Exposure),              # Offset
+  categorical_feature   = categorical_features,             # Explicit indication
+  params                = list(features_pre_filter = FALSE) # Vary min_data_in_leaf
+)
+
+# Using the same folds for every configuration to stabilise differences in score
+# Groups are now formed by covariate profile
+make_group_folds <- function(df, y, features, k, seed) {
+  key <- do.call(paste, c(df[features], sep = "|"))
+  # Group IDs
+  grp <- match(key, unique(key))                      
+  g_claim <- as.integer(tapply(y > 0, grp, max)) # 1 if any row in the group claimed
+
+  set.seed(seed)
+  g_fold <- integer(length(g_claim))
+  # stratify groups by claim/no-claim
+  for (s in 0:1) {                                    
+    idx <- which(g_claim == s)
+    g_fold[idx] <- sample(rep_len(seq_len(k), length(idx)))
+  }
+  # every row inherits its group's fold
+  fold_id <- g_fold[grp]
+  lapply(seq_len(k), function(f) which(fold_id == f))
+}
+
+folds <- make_group_folds(train, train$ClaimNb, all_features, k_folds, seed)
+
+# Hyperparameter tuning
+# De-center depth, focus on the number of leaves
+grid_search <- expand.grid(
+  num_leaves = c(4, 7, 15, 31, 63, 127, 255),
+  min_data_in_leaf = c(25, 50, 100, 250, 500, 1000, 5000)
+)
+
+# grid_search <- subset(grid_search, num_leaves <=2^max_depth)
+
+base_params <- list(
+  objective          = "poisson",
+  metric             = "poisson",  # Poisson Negative log-likelihood
+  max_depth          = -1,
+  learning_rate      = lr, 
+  seed               = seed,
+  num_threads        = 2,
+  deterministic      = TRUE,       # Reproducible results
+  force_row_wise     = TRUE,
+  verbose            = -1
+)
+
+# Grid search
+results <- vector("list", nrow(grid_search))
+
+for(i in seq_len(nrow(grid_search))) {
+  cat(sprintf("\n--- Testing Model %d/%d ---\n", i, nrow(grid_search)))
+  params <- c(base_params, as.list(grid_search[i, ]))
+
+  cv <- lgb.cv(
+    params                = params,
+    data                  = lightgbm_train,
+    nrounds               = nrounds,
+    folds                 = folds,
+    early_stopping_rounds = 50, 
+    verbose               = -1
+  )
+  
+  history <- unlist(cv$record_evals$valid$poisson$eval)
+  best_iter <- cv$best_iter
+  if(is.null(best_iter)||length(best_iter) == 0||best_iter < 1)
+     best_iter <- which.min(history)
+  best_loss <- history[best_iter]
+  err_hist <- unlist(cv$record_evals$valid$poisson$eval_err)
+  best_sd <- if (length(err_hist) >= best_iter) err_hist[best_iter] else NA_real_
+  
+  cat(sprintf(" trees: %d | CV Poisson NLL: %.5f\n",best_iter, best_loss))
+  
+  # Organised results in summary tracker
+  results[[i]] <- data.frame(
+    grid_search[i, ],
+    best_trees  = best_iter,
+    valid_nll   = best_loss,
+    hit_cap     = best_iter>=nrounds,
+    valid_se    = best_sd/sqrt(k_folds)
+  )
+}
+
+grid_results <- do.call(rbind, results)
+grid_results <- grid_results[order(grid_results$valid_nll), ]
+rownames(grid_results) <- NULL
+
+cat("\nAll configurations, best first: \n")
+print(grid_results, digits = 5)
+
+print("Top Structural Layouts: ")
+print(head(grid_results, 5))
+
+best <- grid_results[1, ]
+cat(sprintf("\nBest num_leaves = %d (grid %d-%d), min_data_in_leaf = %d (grid %d-%d)\n",
+            best$num_leaves, min(grid_search$num_leaves), 
+            max(grid_search$num_leaves),best$min_data_in_leaf,
+            min(grid_search$min_data_in_leaf), max(grid_search$min_data_in_leaf)
+            ))
+
+if (best$num_leaves %in% range(grid_search$num_leaves)||
+    best$min_data_in_leaf %in% range(grid_search$min_data_in_leaf)) {
+  cat("Best configuration is on the grid edge: consider extending the grid.\n")
+}
+if (any(grid_results$hit_cap)) {
+  cat("Some runs hit NROUNDS: raise it.\n")
+}
+
+# One string per covariate profile (same key as make_group_folds)
+key_train <- do.call(paste, c(train[all_features], sep = "|"))
+key_test  <- do.call(paste, c(test[all_features],  sep = "|"))
+
+# 1. Share of TEST rows whose profile also appears in TRAIN
+mean(key_test %in% key_train)
+
+# 2. Share of TRAIN rows that have at least one identical-profile sibling in train
+mean(duplicated(key_train) | duplicated(key_train, fromLast = TRUE))
+
+```
+
+Having ranked the models by the Poisson NLL, the study selects all configurations within one standard error of the best model and out of these, it picks the one with the smallest total number of leaves.
+The total number of leaves serves as a measure of model complexity that is relevant to the paper's discussion on explainability.
+The selection is not revisited after the test data is scored.
+
+```{r GBM selection, eval = FALSE, include = TRUE, echo = FALSE}
+grid_results$total_leaves <- grid_results$num_leaves*grid_results$best_trees
+valid_runs <- grid_results[!grid_results$hit_cap, ]
+sensitivity <- valid_runs[which.min(valid_runs$valid_nll), ]
+eligible <- valid_runs[valid_runs$valid_nll<=sensitivity$valid_nll+sensitivity$valid_se, ]
+selected <- eligible[order(eligible$total_leaves, eligible$valid_nll), ][1, ]
+print(selected, digits = 5); print(sensitivity, digits = 5)
+saveRDS(list(selected  = selected, 
+             sensitivity = sensitivity, 
+             grid = grid_results, 
+             locked_at = Sys.time()), 
+        "model_selection_locked.rds"
+        )
+```
+
+### Artificial Neural Network
+
+The study considers a neural network that estimates claim frequency with a Poisson negative log-likelihood loss function and an exposure offset.
+The categorical variables in the insurance data are converted into 0-based integer codes and captured into the network through embedded layers with dimensions captured in `emb_dim` which assigns `VehBrand` and `Area` 4 each, `VehGas`, 2, and `Region`, 8.
+The training begins with an intercept-only model, then follows the loss function to pursue more accurate predictions.
+
+The grid used in the ANN has four architectures with one to three hidden layers and two L2 penalties.
+Besides this, the tuning and selection follows the logic created for the GBM.
+The training run uses the median number of epochs in the cross-validation.
+The predictions are taken as the average of five networks trained from different random seeds, to reduce the run-to-run variability in the training.
+
+```{r ann-tuning, eval = FALSE, include = FALSE, echo = FALSE}
+# --- SETUP ---
+# ANN Set-up with grouped-CV tuning, locked selection, and seed ensemble final fit. 
+# Inheriting train, test, and folds from GBM setup. 
+
+if (!reticulate::py_available()) reticulate::py_require(python_version = "3.12")
+require(keras3)
+
+# Reused variables: train, folds, seed, k_folds, continuous_features, categorical_features
+
+required <- c("train", "folds", "seed", "k_folds", "cat_levels",
+              "continuous_features", "categorical_features")
+missing_objects <- required[!sapply(required, exists)]
+if (length(missing_objects)>0) {
+  stop("Missing from the session: ", paste(missing_objects, collapse = ", "), 
+       call. = FALSE)
+}
+stopifnot(length(folds) == k_folds)
+
+# ANN-specific settings
+QUICK          <- FALSE
+ANN_LR         <- 0.001
+BATCH          <- 4096
+MAX_EPOCHS     <- 200     # Safety cap
+PATIENCE       <- 10      # Early-stopping Patience
+N_FINAL_SEEDS  <- 5
+
+emb_dim <- c(VehBrand = 4, VehGas = 2, Area = 4, Region = 8)
+
+# --- CAPTURE DATA AS NETWORK INPUTS ---
+
+# Categoricals as 0-based integer codes
+stopifnot(identical(
+  cat_levels, lapply(train[categorical_features], function(x) levels(as.factor(x)))
+))
+
+# Continuous variables standardised to be more meaningful network inputs
+cont_centre <- colMeans(train[continuous_features])
+cont_scale  <- apply(train[continuous_features], 2, sd)
+
+make_inputs <- function(df) {
+  inp <- lapply(categorical_features, function(v) {
+    # 0-based codes
+    code <- match(as.character(df[[v]]), cat_levels[[v]]) - 1L  
+    code[is.na(code)] <- length(cat_levels[[v]])
+    matrix(as.integer(code), ncol = 1)
+  })
+  names(inp) <- categorical_features
+  cont <- sweep(as.matrix(df[continuous_features]), 2, cont_centre, "-")
+  inp$continuous <- sweep(cont, 2, cont_scale, "/")
+  
+  # Exposure as a its own input
+  inp$Exposure <- matrix(df$Exposure, ncol = 1)
+  inp
+}
+subset_inputs <- function(inp, idx) lapply(inp, function(m) m[idx, , drop = FALSE])
+
+inp_train <- make_inputs(train)
+y_train <- train$ClaimNb
+base_freq <- sum(train$ClaimNb)/sum(train$Exposure)
+n_train <- nrow(train)
+
+# --- NETWORK BUILD ---
+
+# Model Specs
+build_model <- function(units, l2) {
+  reg  <- if(l2 > 0) regularizer_l2(l2) else NULL
+  ins  <- list()
+  embs <- list()
+  
+  # Embedded layers for all categorical codes
+  for (v in categorical_features) {
+    ins[[v]]  <- layer_input(shape = 1, name = v, dtype = "int32")
+    embs[[v]] <- ins[[v]] %>%
+      layer_embedding(input_dim = length(cat_levels[[v]]) + 1, 
+                      output_dim = emb_dim[[v]])%>%
+      layer_flatten()
+  }
+  cont_in     <- layer_input(shape = length(continuous_features), name = "continuous")
+  exposure_in <- layer_input(shape = 1, name = "Exposure")
+  
+  x <- layer_concatenate(c(unname(embs), list(cont_in)))
+  
+  # Pass the concatenated categorical vectors and the 5 scaled continuous variables
+  # through the hidden ReLu layers
+  for (u in units) {
+    x <- layer_dense(x, units = u, activation = "relu", kernel_regularizer = reg)
+  }
+  rate <- layer_dense(x, units = 1, activation = "exponential", name = "rate", 
+                      kernel_initializer = "zeros", 
+                      bias_initializer = initializer_constant(log(base_freq)))
+  
+  # Multiplying the output from the previous layer (annual claim rate) by the exposure, 
+  # gives the expected claims for a policy, the same structure as a log-link with 
+  # the exposure offset in the GLM or GBM
+  out <- layer_multiply(list(rate, exposure_in))
+  
+  model <- keras_model(inputs = c(unname(ins), list(cont_in, exposure_in)),
+                       outputs = out)
+  
+  # Loss is the Poisson Negative Log-Likelihood, same as GLM and GBM 
+  # NLL is given by $\mu - y*log\mu$
+  compile(model, optimizer = optimizer_adam(learning_rate = ANN_LR), loss = "poisson")
+  model
+}
+
+# Grid: 4 architectures and 2 L2 settings
+archs <- list(A = c(16), B = c(32, 16), C = c(64, 32), D = c(128, 64, 32))
+ann_cfg_grid <- expand.grid(arch = names(archs), l2 = c(0, 1e-5), stringsAsFactors = FALSE)
+
+K_RUN <- k_folds
+if (QUICK) {
+  ann_cfg_grid <- ann_cfg_grid[2, , drop = FALSE]; 
+  K_RUN <- 1; 
+  MAX_EPOCHS <- 3
+}
+
+# Cross validated tuning on the grouped folds
+# CV loss = Keras "poisson" loss (Poisson NLL without the constant) (the same
+# scale as the LightGBM poisson metric and the GLM CV score)
+
+fit_fold <- function(units, l2, tr_idx, va_idx) {
+  set_random_seed(seed)
+  model <- build_model(units, l2)
+  h <- fit(model,x = subset_inputs(inp_train, tr_idx), 
+           y = y_train[tr_idx], 
+           validation_data = list(subset_inputs(inp_train, va_idx), 
+                                  y_train[va_idx]),
+           epochs = MAX_EPOCHS, 
+           batch_size = BATCH, 
+           shuffle = TRUE, verbose = 0,
+           callbacks = list(callback_early_stopping(monitor = "val_loss", patience = PATIENCE,
+                                                    restore_best_weights = TRUE))
+  )
+  
+  # Record validation loss, best epoch, and parameter count, then clear memory
+  val <- unlist(h$metrics$val_loss)
+  out <- list(best_epoch = which.min(val), 
+              best_loss = min(val),
+              n_params = model$count_params())
+  clear_session()
+  out
+  }
+
+ann_results <- vector("list", nrow(ann_cfg_grid))
+
+# Print out the configurations and their losses
+for (i in seq_len(nrow(ann_cfg_grid))) {
+  cat(sprintf("\n--- Configuration %d/%d: arch %s, L2 %g ---\n",
+              i, nrow(ann_cfg_grid), ann_cfg_grid$arch[i], ann_cfg_grid$l2[i]))
+  fold_out <- vector("list", K_RUN)
+  for (k in seq_len(K_RUN)) {
+    t0     <- Sys.time()
+    va_idx <- folds[[k]]
+    tr_idx <- setdiff(seq_len(n_train), va_idx)
+    fold_out[[k]] <- fit_fold(archs[[ann_cfg_grid$arch[i]]], ann_cfg_grid$l2[i], tr_idx, va_idx)
+    cat(sprintf("  fold %d: best epoch %d | val loss %.5f | %.0fs\n", k,
+                fold_out[[k]]$best_epoch, fold_out[[k]]$best_loss,
+                as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+  }
+  losses <- sapply(fold_out, `[[`, "best_loss")
+  epochs <- sapply(fold_out, `[[`, "best_epoch")
+  ann_results[[i]] <- data.frame(
+    arch         = ann_cfg_grid$arch[i], 
+    l2           = ann_cfg_grid$l2[i],
+    n_params     = fold_out[[1]]$n_params,
+    cv_loss      = mean(losses),
+    cv_se        = if (K_RUN > 1) sd(losses) / sqrt(K_RUN) else NA_real_, 
+    median_epoch = median(epochs),
+    hit_cap      = any(epochs >= MAX_EPOCHS)
+  )
+  saveRDS(do.call(rbind, ann_results), "ann_grid_checkpoint.rds")
+  }
+
+ann_grid <- do.call(rbind, ann_results)
+ann_grid <- ann_grid[order(ann_grid$cv_loss), ]
+rownames(ann_grid) <- NULL
+cat("\nANN grid, best first:\n"); print(ann_grid, digits = 5)
+
+if (QUICK) {
+  stop("Quick timing run finished. Set QUICK <- FALSE for the full run.", call. = FALSE)
+}
+
+# --- SELECTION AND LOCKING ---
+
+# Selection rule with the same logic as GBM
+
+# i. Drop capped runs
+ann_valid_runs  <- ann_grid[!ann_grid$hit_cap, ]
+
+# ii. Define the sensitivity case with the best `cv_loss`: 
+# everything within 1 SE of it is eligible
+ann_sensitivity <- ann_valid_runs[which.min(ann_valid_runs$cv_loss), ]
+ann_eligible    <- ann_valid_runs[ann_valid_runs$cv_loss<=ann_sensitivity$cv_loss + 
+                                    ann_sensitivity$cv_se, ]
+
+# iii. Select the eligible model with the fewest trainable parameters (least complex) 
+ann_selected    <- ann_eligible[order(ann_eligible$n_params, 
+                                      ann_eligible$cv_loss), ][1, ]
+
+cat("\nSelected (simplest eligible):\n"); print(ann_selected, digits = 5)
+cat("\nSensitivity (best CV score):\n");  print(ann_sensitivity, digits = 5)
+
+# Save specs of selected model
+saveRDS(list(selected = ann_selected, 
+             sensitivity = ann_sensitivity, 
+             grid = ann_grid,
+             archs = archs, 
+             settings = list(ANN_LR = ANN_LR, 
+                             BATCH = BATCH, 
+                             PATIENCE = PATIENCE,
+                             emb_dim = emb_dim, 
+                             seed = seed),
+             locked_at = Sys.time()),
+        "ann_selection_locked.rds")
+
+# --- FINAL FIT ---
+# Train the 2 selected configurations on the complete `train` dataset for median_epochs
+# No validation data, no early stopping
+fit_final <- function(cfg, run_seed) {
+  set_random_seed(run_seed)
+  model <- build_model(archs[[cfg$arch]], cfg$l2)
+  fit(model, x = inp_train, 
+      y = y_train, 
+      epochs = cfg$median_epoch,
+      batch_size = BATCH, 
+      shuffle = TRUE, 
+      verbose = 0)
+  model
+  }
+
+final_models <- function(cfg, tag) {
+  lapply(seq_len(N_FINAL_SEEDS), function(s) {
+    m <- fit_final(cfg, seed + s)
+    save_model(m, sprintf("ann_%s_seed%d.keras", tag, s), overwrite = TRUE)
+    m
+    })
+  }
+
+ann_selected_models    <- final_models(ann_selected, "selected")
+ann_sensitivity_models <- final_models(ann_sensitivity, "sensitivity")
+
+# Ensemble prediction: expected claim counts (rate x Exposure), averaged over 
+# 5 different seeds to smooth out the run-to-run variability 
+ann_predict <- function(models, df) {
+  inp <- make_inputs(df)
+  rowMeans(sapply(models, function(m) as.numeric(predict(m, inp, verbose = 0))))
+  }
+
+# In-sample sanity check only (train): calibration should be close to 1
+mu_check <- ann_predict(ann_selected_models, train)
+cat(sprintf("\nTrain calibration (selected ANN ensemble): %.4f\n",
+            sum(mu_check) / sum(train$ClaimNb)))
+
+
+```
+
+## Evaluation Framework
+
+This section evaluates the GLM and two configurations of each tuned model class (GBM and ANN) on the test dataset.
+These configurations include the selected configuration and the sensitivity configuration.
+The sensitivity configurations show the best cross validated loss in each model class, regardless of its complexity.
+In this context, this simplicity or complexity is characterised by the number of coefficients for the GLM, total leaves for the GBM, and trainable parameters for the neural network.
+This enables the consideration of whether the conclusions drawn from these models depend on the simplicity rule.
+The evaluation and selection criteria is provided in further detail in the appendices and the repository.
+
+```{r evaluation-framework, eval = FALSE, include = FALSE, echo = FALSE}
+# --- Test Evaluation ---
+require(lightgbm)
+require(keras3)
+
+# Prevent a second run unless this is TRUE
+OVERWRITE   <- FALSE
+BOOT_B      <-2000
+BOOT_SEED   <- 2027
+if(file.exists("final_evaluation_results.rds") && !OVERWRITE) {
+  stop("final_evaluation_results.rds already exists: the test set has been scored.", 
+       "Set OVERWRITE <- TRUE only for a deliberate re-run. ",
+       call. = FALSE)
+}
+
+# Import required datasets and methods from previous blocks
+carry <- c("train", "test", "base_params", "N_FINAL_SEEDS", "prep_matrix", 
+           "make_inputs", "ann_predict", "glm_freq", "categorical_features")
+
+missing_objs <- carry[!sapply(carry, exists)]
+if(length(missing_objs)>0) {
+  stop("Missing from the session: ", paste(missing_objs, collapse = ", "),
+       call. = FALSE)
+}
+
+if(!exists("profile_columns")) {
+  profile_columns <- c("VehPower", "VehAge", "DrivAge", "BonusMalus", 
+                       "VehBrand", "VehGas", "Area", "Density", "Region")
+}
+
+# Locked selections import with timestamps (audit trail)
+gbm_lock <- readRDS("model_selection_locked.rds")
+ann_lock <- readRDS("ann_selection_locked.rds")
+cat("GBM selection locked at:", format(gbm_lock$locked_at), "\n")
+cat("ANN selection locked at:", format(ann_lock$locked_at), "\n")
+cat("Evaluation run at:    ", format(Sys.time()), "\n")
+
+# Models
+stopifnot(inherits(glm_freq, "glm"), 
+          nobs(glm_freq) == nrow(train),
+          grepl("offset(log(Exposure))", 
+                paste(deparse(formula(glm_freq)),
+                      collapse = ""), fixed = TRUE))
+
+for (v in c("DrivAgeBin", "VehAgeBin", "VehBrand", "VehGas", "Area", "Region")) {
+  unseen <- setdiff(unique(as.character(test[[v]])), 
+                    unique(as.character(train[[v]])))
+  if (length(unseen)>0) {
+    stop("Level(s) in test but not in train for ", v, ": ",
+         paste(unseen, collapse = ", "), 
+         call. = FALSE)
+  }
+}
+
+lightgbm_train <- lgb.Dataset(
+  data = prep_matrix(train), 
+  label = train$ClaimNb, 
+  init_score = log(train$Exposure),
+  categorical_feature = categorical_features, 
+  params = list(feature_pre_filter = FALSE)
+  )
+
+fit_gbm <- function(cfg) {
+  params <- c(base_params, list(num_leaves = cfg$num_leaves, 
+                                min_data_in_leaf = cfg$min_data_in_leaf))
+  
+  lgb.train(params = params, 
+            data = lightgbm_train,
+            nrounds = cfg$best_trees,
+            verbose = -1
+            )
+}
+
+gbm_models <- list(GBM_selected    = fit_gbm(gbm_lock$selected),
+                   GBM_sensitivity = fit_gbm(gbm_lock$sensitivity))
+
+load_ann <- function(tag) {
+  lapply(seq_len(5), function(s) {
+    path <- sprintf("ann_%s_seed%d.keras", tag, s)
+    if (!file.exists(path)) stop("Missing ANN model: ", normalizePath(path))
+    keras3::load_model(path)
+  })
+}
+
+ann_selected_models <- load_ann("selected")
+ann_sensitivity_models <- load_ann("sensitivity")
+
+
+# Expected claim counts for every model
+predict_all <- function(df) {
+  mat <- prep_matrix(df)
+  list(
+    GLM             = as.numeric(predict(glm_freq, newdata = df, type = "response")),
+    GBM_selected    = predict(gbm_models$GBM_selected,    mat) * df$Exposure,
+    GBM_sensitivity = predict(gbm_models$GBM_sensitivity, mat) * df$Exposure,
+    ANN_selected    = ann_predict(ann_selected_models,    df),
+    ANN_sensitivity = ann_predict(ann_sensitivity_models, df)
+  )
+}
+mu <- list(train = predict_all(train), test = predict_all(test))
+model_names <- names(mu$test)
+
+# Metrics
+dev_terms <- function(y, mu) 2*(ifelse(y>0, y*log(y/mu), 0) - (y-mu))
+poisson_deviance <- function(y, mu) mean(dev_terms(y, mu))
+poisson_loglik   <- function(y, mu) mean(dpois(y, mu, log = TRUE))
+
+# Exposure-weighted Gini
+
+gini_lorenz <- function(y, mu_vec, expo) {
+  ord <- order(mu_vec/expo)
+  x <- c(0, cumsum(expo[ord])/sum(expo))
+  l <- c(0, cumsum(y[ord])/sum(y))
+  n <- length(x)
+  auc <- sum((x[-1] - x[-n]) * (l[-1] + l[-n]) / 2)
+  1-2*auc
+}
+
+metric_row <- function(model, set, df, mu_vec) {
+  data.frame(model       = model, 
+             set         = set, 
+             deviance    = poisson_deviance(df$ClaimNb, mu_vec),
+             loglik      = poisson_loglik(df$ClaimNb, mu_vec),
+             calibration = sum(mu_vec)/sum(df$ClaimNb), # predicted/observed
+             gini        = gini_lorenz(df$ClaimNb, mu_vec, df$Exposure)
+             )
+}
+
+metrics <- do.call(rbind, lapply(model_names, function(m)
+  rbind(metric_row(m, "train", train, mu$train[[m]]),
+        metric_row(m, "test", test, mu$test[[m]]))))
+rownames(metrics) <- NULL
+
+complexity <- data.frame(
+  model    = model_names,
+  measure  = c("coefficients", "total leaves", "total leaves", 
+               "trainable parameters", "trainable parameters"),
+  value    = c(length(coef(glm_freq)),
+               gbm_lock$selected$num_leaves * gbm_lock$selected$best_trees,
+               gbm_lock$sensitivity$num_leaves * gbm_lock$sensitivity$best_trees,
+               ann_lock$selected$n_params, ann_lock$sensitivity$n_params)
+)
+
+cat("\nMetrics (mean Poisson deviance and log-likelihood per row; 
+    calibration = predicted / observed):\n")
+print(metrics, digits = 5)
+cat("\nComplexity:\n"); print(complexity)
+
+# Calibration by predicted-risk decile (test set)
+decile_table <- function(y, mu_vec, expo, n = 10) {
+  dec <- ceiling(rank(mu_vec/expo, ties.method = "first")/length(y)*n)
+  observed <- as.numeric(tapply(y, dec, sum))
+  predicted <- as.numeric(tapply(mu_vec, dec, sum))
+  data.frame(
+    decile     = seq_len(n),
+    exposure   = as.numeric(tapply(expo, dec, sum)),
+    observed   = observed,
+    predicted  = predicted,
+    ratio      = predicted/observed
+  )
+}
+deciles <- do.call(rbind, lapply(model_names, function(m)
+  data.frame(model = m, decile_table(test$ClaimNb, 
+                                     mu$test[[m]], 
+                                     test$Exposure)
+             )
+  ))
+
+# Uncertainty (bootstrap over profile groups in the test set)
+key_test  <- do.call(paste, c(test[profile_columns], sep = "|"))
+g_test    <- match(key_test, unique(key_test))
+G         <- max(g_test)
+n_g       <- tabulate(g_test, G)
+y_g       <- rowsum(test$ClaimNb, g_test)[, 1]
+
+D_g       <- sapply(model_names, 
+                    function(m) rowsum(dev_terms(test$ClaimNb, 
+                                                 mu$test[[m]]), g_test)[, 1])
+M_g       <- sapply(model_names, 
+                    function(m) rowsum(mu$test[[m]], g_test) [, 1])
+
+
+set.seed(BOOT_SEED)
+boot_dev <- matrix(NA_real_, BOOT_B, 
+                   length(model_names), 
+                   dimnames = list(NULL, model_names))
+boot_cal <- boot_dev
+for (b in seq_len(BOOT_B)) {
+  idx           <- sample.int(G, G, replace = TRUE)
+  boot_dev[b, ] <- colSums(D_g[idx, , drop = FALSE])/sum(n_g[idx])
+  boot_cal[b, ] <- colSums(M_g[idx, , drop = FALSE])/sum(y_g[idx])
+}
+
+ci <- function(x) quantile(x, c(0.025, 0.975), names = FALSE)
+test_metrics <- metrics[metrics$set == "test", ]
+
+single_ci <- data.frame(
+  model = model_names,
+  deviance = test_metrics$deviance,
+  dev_lo = sapply(model_names, function(m) ci(boot_dev[, m])[1]),
+  dev_hi = sapply(model_names, function(m) ci(boot_dev[, m])[2]),
+  calibration = test_metrics$calibration,
+  cal_lo = sapply(model_names, function(m) ci(boot_cal[, m])[1]),
+  cal_hi = sapply(model_names, function(m) ci(boot_cal[, m])[2]))
+rownames(single_ci) <- NULL
+
+# Differences in mean deviance
+pairs <- list(c("GBM_selected", "GLM"), c("ANN_selected", "GLM"),
+              c("GBM_selected", "ANN_selected"),
+              c("GBM_sensitivity", "ANN_sensitivity"),
+              c("GBM_selected", "GBM_sensitivity"),
+              c("ANN_selected", "ANN_sensitivity"))
+diff_table <- do.call(rbind, lapply(pairs, function(p) {
+  d_obs  <- test_metrics$deviance[test_metrics$model == p[1]] -
+            test_metrics$deviance[test_metrics$model == p[2]]
+  d_boot <- boot_dev[, p[1]] - boot_dev[, p[2]]
+  data.frame(first = p[1], second = p[2], diff = d_obs,
+             lo = ci(d_boot)[1], hi = ci(d_boot)[2],
+             share_first_better = mean(d_boot < 0))
+}))
+
+cat("\nTest deviance and calibration with 95% group-bootstrap intervals:\n")
+print(single_ci, digits = 5)
+cat("\nPaired deviance differences (negative = first model better):\n")
+print(diff_table, digits = 5)
+
+# Save all outputs
+saveRDS(list(metrics = metrics, complexity = complexity, deciles = deciles, 
+             single_ci = single_ci, diff_table = diff_table,
+             mu_test = mu$test, boot = list(B = BOOT_B, seed = BOOT_SEED),
+             run_at = Sys.time()),
+        "final_evaluation_results.rds")
+```
+
+## Explainability
+
+This section directly addresses research questions 1 and 3 in four R scripts that carry out further analysis on the freMTPL2freq dataset from CASdatasets.
+The scripts are described individually to provide a clear explanation of the approach they each take and the desired result.
+
+### Explainability Setup
+
+In the first script below, the study sets up the environment for the entire section.
+It provides a switch `PILOT <- TRUE` between a pilot run and a full run which provides the metrics that the study reports.
+It then defines one prediction wrapper for each of the models scored in the performance section using `make_glm_fn`, `make_gbm_fn`, and `make_ann_fn` which take the data frame of the nine input variables and return the *log of expected annual frequency at unit exposure*.
+The integrity check validates that the wrappers reproduce the predictions from the evaluation section.
+
+After this, the script generates the stratified sample for explanation.
+`shap_exact` determines the exact SHAP values.
+It lets the features inside the coalition take the values from the policy, and the rest take values from the background rows, and averages the prediction over the background to provide $2^9$ values.
+These values are combined with the Shapley weights to produce the exact SHAP values.
+This approach provides the same quantity that is computed by KernelSHAP by sampling, while removing coalition-sampling error.
+
+```{r explainability-setup, eval = FALSE, include = TRUE, echo = FALSE}
+# Test the code quickly with a smaller sample for lower compute, then revert
+PILOT <- FALSE
+
+# Design settings, for pilot and full run
+## Policies explained
+N_EXPL    <- if (PILOT) 30 else 300
+
+## Portion used for the stability analyses
+N_STAB    <- if (PILOT) 20 else 100
+
+## Subset used for LIME
+N_LIME    <- if (PILOT) 10 else 60
+
+## Background rows for marginal value function
+B_BG      <- if (PILOT) 20 else 50
+
+EXPL_SEED <- 2028
+BG_SEED   <- 2029
+RUN_TAG   <- if (PILOT) "_pilot" else ""
+
+# Import required items
+required <- c("train", "test", "glm_freq", "gbm_models", "ann_selected_models",
+              "ann_sensitivity_models", "prep_matrix", "make_inputs",
+              "continuous_features", "categorical_features")
+
+missing_objs <- required[!sapply(required, exists)]
+
+if (length(missing_objs) > 0) {
+  stop("Missing from the session: ", 
+       paste(missing_objs, collapse = ", "), 
+       call. = FALSE)
+} 
+
+feats <- c(continuous_features, categorical_features)
+p     <- length(feats) 
+
+#---- Prediction Wrappers ----
+
+# Reproduce GLM bins from the training data
+make_binner <- function(x, bin) {
+  bin <- factor(bin)
+  lo  <- sort(tapply(x, bin, min))  # lower edge of each bin
+  lv  <- names(lo)
+  function(new_x) factor(lv[pmax(findInterval(new_x, lo), 1L)], levels = levels(bin))
+}
+bin_driver  <- make_binner(train$DrivAge, train$DrivAgeBin)
+bin_vehicle <- make_binner(train$VehAge,  train$VehAgeBin)
+stopifnot(all(bin_driver(train$DrivAge) == factor(train$DrivAgeBin)),
+          all(bin_vehicle(train$VehAge) == factor(train$VehAgeBin)))
+
+add_glm_cols <- function(df) {
+  df$Exposure   <- 1
+  df$DrivAgeBin <- bin_driver(df$DrivAge)
+  df$VehAgeBin  <- bin_vehicle(df$VehAge)
+  df
+}
+make_glm_fn <- function(glm_obj) {
+  function(df) log(as.numeric(predict(glm_obj, newdata = add_glm_cols(df), type = "response")))
+}
+make_gbm_fn <- function(lgb_model) {
+  function(df) log(predict(lgb_model, prep_matrix(df)))
+}
+
+make_ann_fn <- function(models) {
+  function(df) {
+    d <- df; d$Exposure <- 1
+    inp <- make_inputs(d)
+    preds <- do.call(cbind, lapply(models, function(m)
+      as.numeric(predict(m, inp, batch_size = 8192, verbose = 0))))
+    log(rowMeans(preds))
+  }
+}
+
+expl_fns <- list(
+  GLM             = make_glm_fn(glm_freq),
+  GBM_selected    = make_gbm_fn(gbm_models$GBM_selected),
+  GBM_sensitivity = make_gbm_fn(gbm_models$GBM_sensitivity),
+  ANN_selected    = make_ann_fn(ann_selected_models),
+  ANN_sensitivity = make_ann_fn(ann_sensitivity_models)
+)
+
+# Integrity check: wrappers must reproduce the scored test predictions
+if (exists("mu")) {
+  for (m in names(expl_fns)) {
+    chk <- exp(expl_fns[[m]](test[1:300, feats])) * test$Exposure[1:300]
+    stopifnot(isTRUE(all.equal(unname(chk), unname(mu$test[[m]][1:300]), tolerance = 1e-4)))
+  }
+  cat("Wrapper check passed: predictions match the evaluation results.\n")
+} else {
+  warning("`mu` not found: wrapper integrity check skipped.")
+}
+
+# ---- Explanation Sample: Test policies stratified by predicted-risk decile ----
+set.seed(EXPL_SEED)
+pred_freq <- exp(expl_fns$GBM_selected(test[feats])) 
+dec       <- ceiling(rank(pred_freq, ties.method = "first") / nrow(test) * 10) 
+per_dec   <- ceiling(N_EXPL / 10) 
+expl_idx  <- unlist(lapply(1:10, function(d) sample(which(dec == d), per_dec)))
+dec_expl  <- rep(1:10, each = per_dec) 
+expl_df   <- test[expl_idx, feats]
+rownames(expl_df) <- NULL 
+
+# Stability and LIME subsets
+per_stab  <- ceiling(N_STAB / 10)
+stab_pos  <- unlist(lapply(1:10, function(d) which(dec_expl == d)[seq_len(per_stab)]))
+stab_df   <- expl_df[stab_pos, ]; rownames(stab_df) <- NULL
+dec_stab  <- dec_expl[stab_pos]
+per_lime  <- ceiling(N_LIME / 10)
+lime_pos  <- unlist(lapply(1:10, function(d) which(dec_stab == d)[seq_len(per_lime)]))
+lime_df   <- stab_df[lime_pos, ]; rownames(lime_df) <- NULL
+
+# Fixed Background
+draw_bg <- function(seed) {
+  set.seed(seed);
+  train[sample.int(nrow(train), B_BG), feats] 
+}
+bg_main <- draw_bg(BG_SEED)
+
+# ---- Exact Shapley Values by full enumeration of the 2^p coalitions ----
+Z <- as.matrix(expand.grid(rep(list(c(FALSE, TRUE)), p))) 
+colnames(Z) <- feats
+sizes <- rowSums(Z)
+wt    <- function(k) 
+  if (k < 0 || k > p - 1) 0 else factorial(k) * factorial(p - k - 1) / factorial(p)
+W <- sapply(seq_len(nrow(Z)), function(s) 
+  ifelse(Z[s, ], wt(sizes[s] - 1), -wt(sizes[s])))
+
+# All hybrid rows for one policy
+hybrid_df <- function(x_row, bg_df) {
+  B     <- nrow(bg_df); n_coal <- nrow(Z)
+  pool  <- rbind(x_row, bg_df)            # row 1 = the policy
+  b_idx <- rep(seq_len(B), times = n_coal) + 1L
+  cols  <- lapply(feats, 
+                  function(f) pool[[f]][
+                    ifelse(rep(Z[, f], each = B), 1L, b_idx)
+                    ])
+  names(cols) <- feats
+  as.data.frame(cols)
+}
+
+shap_exact <- function(pred_fun, x_df, bg_df) {
+  n   <- nrow(x_df)
+  phi <- matrix(NA_real_, n, p, 
+                dimnames = list(NULL, feats))
+  fx  <- numeric(n); base <- numeric(n)
+  for (i in seq_len(n)) {
+    v <- colMeans(matrix(pred_fun(hybrid_df(x_df[i, , drop = FALSE], bg_df)),
+                         nrow = nrow(bg_df)))
+    phi[i, ] <- as.numeric(W %*% v)
+    fx[i]  <- v[nrow(Z)]       # full coalition = the policy's own prediction
+    base[i] <- v[1]            # empty coalition = background mean
+  }
+  list(phi = phi, fx = fx, baseline = base)
+}
+
+# ---- Lock Design ----
+
+saveRDS(list(expl_idx = expl_idx, dec_expl = dec_expl, 
+             stab_pos = stab_pos, lime_pos = lime_pos,
+             settings = list(N_EXPL = N_EXPL, N_STAB = N_STAB, 
+                             N_LIME = N_LIME, B_BG = B_BG, 
+                             EXPL_SEED = EXPL_SEED, BG_SEED = BG_SEED, PILOT = PILOT),
+             created_at = Sys.time()),
+        paste0("explain_design", RUN_TAG, ".rds"))
+cat(sprintf("Design ready: %d explained policies (%d for stability, 
+            %d for LIME), background %d rows.\n", 
+            nrow(expl_df), nrow(stab_df), 
+            nrow(lime_df), nrow(bg_main)
+            )
+    )
+
+
+```
+
+### SHAP Fidelity
+
+For every policy, the efficiency check validates the expectation that SHAP values add up to the difference between the prediction and the baseline.
+The script also reviews the GLM consistency given by the absolute difference between SHAP values and centered model-term contributions.
+Expected to be near zero, it agrees to 4.19e-15.
+The script compares the drop in policy predictions over the masked rows with the sum of SHAP values for the replaced features.
+It records the correlation between the attribution sums and the observed prediction drops over all the sampled subsets.
+A high correlation implies that the attribution sums closely track the respective model's changes.
+Similarly, the script records the RMSE difference between the two quantities, such that a lower RMSE reflects better agreement in the log-frequency scale.
+As such, the script presents a specific perturbation-based faithfulness diagnostic.
+
+```{r explainability-shap-fidelity, eval = FALSE, include = TRUE, echo = FALSE}
+# ---- SHAP Values, Pipeline Checks, Fidelity - RQ1 ----
+
+require(shapr)
+stopifnot(exists("expl_fns"), exists("expl_df"), exists("shap_exact"))
+
+# SHAP values for every model
+shap_main <- lapply(names(expl_fns), function(m) {
+  cat("SHAP:", m, "\n")
+  shap_exact(expl_fns[[m]], expl_df, bg_main)
+})
+names(shap_main) <- names(expl_fns)
+
+# Pipeline checks
+
+## Efficiency: Attributions must add up to prediction - baseline
+eff <- sapply(shap_main, 
+              function(s) max(abs(rowSums(s$phi) - (s$fx - s$baseline)))
+              )
+cat("\nMax efficiency error by model (should be ~1e-10 or smaller):\n"); print(signif(eff, 3))
+stopifnot(all(eff < 1e-8))
+
+## The GLM is additive on the log scale
+glm_terms <- function(df) {
+  t <- predict(glm_freq, newdata = add_glm_cols(df), type = "terms")
+  out <- cbind(t[, c("VehPower", "BonusMalusLog", "VehBrand", 
+                     "VehGas", "Area", "DensityLog", "Region")],
+               DrivAge = t[, "DrivAgeBin"], 
+               VehAge = t[, "VehAgeBin"])
+  out[, feats]
+}
+phi_glm_exact <- glm_terms(expl_df) - matrix(colMeans(glm_terms(bg_main)), 
+                                             nrow(expl_df), p, byrow = TRUE)
+
+cat("\nGLM check: max |SHAP - exact term contribution| =",
+    signif(max(abs(phi_glm_exact - shap_main$GLM$phi)), 3), 
+    "(should be ~0)\n")
+stopifnot(max(abs(phi_glm_exact - shap_main$GLM$phi)) < 1e-8)
+
+# Cross-check against shapr
+SHAPR_IDS <- 1:10
+SHAPR_TOL <- 0.02
+
+if (!requireNamespace("shapr", quietly = TRUE)) {
+  stop("The shapr package is required for the cross-check: install.packages('shapr')", 
+       call. = TRUE)
+}
+m  <- "GBM_selected"
+pf <- expl_fns[[m]]
+# shapr treats integer columns as numeric, so declare them as numeric everywhere
+to_num <- function(d) { 
+  d[] <- lapply(d, 
+                function(x) if (is.integer(x)) as.numeric(x) else x); d 
+  }
+bg_shapr <- to_num(bg_main)
+ex <- shapr::explain(
+  model           = structure(list(), class = "lograte_dummy"),
+  x_explain       = to_num(expl_df[SHAPR_IDS, ]),
+  x_train         = bg_shapr,
+  approach        = "independence",
+  phi0            = mean(pf(bg_main)),
+  predict_model   = function(x, newdata) pf(as.data.frame(newdata)),
+  get_model_specs = function(x) list(labels = feats,
+                                     classes = sapply(bg_shapr, class),
+                                     factor_levels = lapply(bg_shapr, levels)),
+  verbose         = NULL)
+
+est <- as.matrix(ex$shapley_values_est[, feats, with = FALSE])
+shapr_diff <- max(abs(est - shap_main[[m]]$phi[SHAPR_IDS, ]))
+cat(sprintf("\nshapr cross-check (%s, %d policies): max abs difference = %.3g (tolerance %.3g)\n",
+            m, length(SHAPR_IDS), shapr_diff, SHAPR_TOL))
+
+stopifnot(shapr_diff < SHAPR_TOL)
+
+# Fidelity
+# --- Do additive attributions describe the model's behavior? ---
+faithfulness <- function(pred_fun, x_df, bg_df, attr, n_subsets = 40, seed = 1) {
+  set.seed(seed)
+  fs  <- colnames(attr); B <- nrow(bg_df); n <- nrow(x_df)
+  out <- data.frame(cor = rep(NA_real_, n), rmse = rep(NA_real_, n))
+  for (i in seq_len(n)) {
+    subs   <- lapply(seq_len(n_subsets),
+                     function(k) sample(fs, sample.int(length(fs) - 1L, 1L)))
+    masked <- do.call(rbind, lapply(subs, function(S) {
+      m <- x_df[rep(i, B), , drop = FALSE]
+      m[S] <- bg_df[S]
+      m
+    }))
+    drop <- pred_fun(x_df[i, , drop = FALSE]) - colMeans(matrix(pred_fun(masked), nrow = B))
+    A    <- vapply(subs, function(S) sum(attr[i, S]), numeric(1))
+    out$cor[i]  <- suppressWarnings(cor(A, drop))
+    out$rmse[i] <- sqrt(mean((A - drop)^2))
+  }
+  out
+}
+
+shap_faith <- lapply(names(expl_fns), function(m) {
+  cat("Fidelity:", m, "\n")
+  faithfulness(expl_fns[[m]], expl_df, bg_main, shap_main[[m]]$phi)
+})
+names(shap_faith) <- names(expl_fns)
+
+shap_faith_summary <- do.call(rbind, lapply(names(shap_faith), function(m) {
+  f <- shap_faith[[m]]
+  data.frame(model = m, faith_cor = mean(f$cor, na.rm = TRUE),
+             faith_cor_se = sd(f$cor, na.rm = TRUE) / sqrt(sum(!is.na(f$cor))),
+             faith_rmse = mean(f$rmse))
+}))
+cat("\nSHAP fidelity (mean over explained policies):\n"); 
+print(shap_faith_summary, digits = 4)
+
+
+# Fidelity by predicted risk decile
+shap_faith_decile <- sapply(names(shap_faith), function(m)
+  tapply(shap_faith[[m]]$cor, dec_expl, mean, na.rm = TRUE))
+cat("\nSHAP fidelity (correlation) by risk decile:\n"); print(round(shap_faith_decile, 3))
+
+saveRDS(list(shap_main = shap_main, shap_faith = shap_faith,
+             shap_faith_summary = shap_faith_summary, shap_faith_decile = shap_faith_decile,
+             efficiency_error = eff, shapr_max_diff = shapr_diff, created_at = Sys.time()),
+        paste0("explain_shap_main", RUN_TAG, ".rds"))
+
+```
+
+### SHAP Stability
+
+This script elaborates the changes in SHAP explanations, studying how much they move, and what drives their changes.
+It considers three sources:
+
+- **Explainer noise:** This is instability that arises from the explainer itself, measured here by fitting the same model with different background samples.
+
+- **Data sensitivity:** This is caused by the model's dependence on its training data.
+  It is measured in `fit_glm_b`, `fit_gbm_b`, and `fit_ann_b` by refitting the GLM, GBM (selected), and ANN(selected) on grouped bootstrap resamples of the training data with locked hyperparameters.
+
+- **Prediction instability:** This refers to the attribution changes that arise from the prediction itself changing.
+  It is calculated below as the standard deviation of each policy's log-prediction across refits.
+
+SHAP attributions must sum to $predictions - baseline$.
+When predictions change, so must the attributions.
+However, upon refitting, similar predictions are credited to different drivers.
+Therefore, model risk is assessed by whether the refit instability exceeds the explainer noise per attribution, and whether the reallocation measure is non-zero and differs across model classes.
+The idea of *'measurable'* model risk rests on these descriptive ratios.
+
+```{r explainability-shap-stability, eval = FALSE, include = TRUE, echo = FALSE}
+# ---- SHAP Stability - RQ3 ----
+
+# Consider the 2 axes of SHAP Stability
+# 1. Explainer noise: Same model, different background samples
+# 2. Data sensitivity: models refitted on grouped bootstrap resamples of `train` 
+#                      with locked hyper-parameters. Same policies, same background
+
+required <- c("expl_fns", "stab_df", "bg_main", "gbm_lock", "ann_lock", "archs",
+              "build_model", "BATCH", "base_params", "profile_columns", "all_features")
+missing_objs <- required[!sapply(required, exists)]
+if (length(missing_objs) > 0) {
+  stop("Missing from the session: ", paste(missing_objs, collapse = ", "), call. = FALSE)
+}
+
+# background repeats (axis 1)
+R_NOISE           <- if (PILOT) 3 else 10 
+# bootstrap refits (axis 2)
+B_REFIT           <- if (PILOT) 3 else 30 
+# 1 = single network per refit; raise to 5 to mimic the final ensemble
+ANN_SEEDS_PER_REFIT <- 1
+REFIT_SEED        <- 3000
+# ignore attributions smaller than 1% log-relativity in sign agreement
+SIGN_MIN          <- 0.01 
+
+stability_metrics <- function(phi_list) {
+  n <- nrow(phi_list[[1]]); 
+  pp <- ncol(phi_list[[1]]); 
+  R <- length(phi_list)
+  arr <- array(unlist(phi_list), dim = c(n, pp, R),
+               dimnames = list(NULL, colnames(phi_list[[1]]), NULL))
+  low <- function(cm) cm[lower.tri(cm)]
+  
+  # R x p global importance
+  imp <- t(sapply(seq_len(R), function(r) colMeans(abs(arr[, , r]))))      
+  glob_rho <- mean(low(cor(t(imp), method = "spearman")), na.rm = TRUE)
+  top3 <- apply(imp, 1, function(v) names(sort(v, decreasing = TRUE))[1:3])
+  prs  <- combn(R, 2)
+  top3_overlap <- mean(apply(prs, 2, function(ij)
+    length(intersect(top3[, ij[1]], top3[, ij[2]])) / 3))
+  loc_rho <- mean(sapply(seq_len(n), function(i)
+    mean(low(suppressWarnings(cor(abs(arr[i, , ]), method = "spearman"))), na.rm = TRUE)),
+    na.rm = TRUE)
+
+  # Scale-free reallocation: distance between attribution PROFILES (|phi| as shares of the total),
+  # so a refit that merely scales an explanation up or down does not count
+  tv <- mean(sapply(seq_len(n), function(i) {
+    q <- apply(abs(arr[i, , ]), 2, function(v) v / sum(v))
+    mean(apply(prs, 2, function(ij) 0.5 * sum(abs(q[, ij[1]] - q[, ij[2]]))))
+  }), na.rm = TRUE)
+
+  sd_phi   <- apply(arr, c(1, 2), sd)
+  share_up <- apply(arr > 0, c(1, 2), mean)
+  big      <- apply(abs(arr), c(1, 2), mean) > SIGN_MIN
+  data.frame(R = R,
+             
+             # agreement of global importance ranking
+             global_rank_cor = glob_rho,                    
+             top3_overlap    = top3_overlap,
+             
+             # agreement of per-policy rankings
+             local_rank_cor  = loc_rho,
+             
+             profile_tv      = tv, # 0 = identical attribution profiles, 1 = disjoint
+             
+             # SD of an attribution, log-frequency units
+             mean_sd_phi     = mean(sd_phi),                
+             premium_equiv   = exp(mean(sd_phi)) - 1, # same, as a +/- relative premium change
+             rel_sd          = mean(sd_phi) / mean(abs(arr)),
+             sign_agreement  = mean(pmax(share_up, 1 - share_up)[big]))
+}
+
+# Axis 1: Explainer Noise
+noise_phi <- lapply(names(expl_fns), function(m) {
+  cat("Axis 1:", m, "\n")
+  lapply(seq_len(R_NOISE), 
+         function(r) 
+           shap_exact(expl_fns[[m]], 
+                      stab_df, 
+                      draw_bg(BG_SEED + r))$phi)
+})
+names(noise_phi) <- names(expl_fns)
+stab_axis1 <- do.call(rbind, 
+                      lapply(names(noise_phi),
+                             function(m) 
+                               cbind(model = m, stability_metrics(noise_phi[[m]])))
+                      )
+cat("\nAxis 1 (explainer noise):\n"); print(stab_axis1, digits = 3)
+
+# Axis 2: Refit on Grouped Bootstrap Resamples of `train`
+key_tr        <- do.call(paste, c(train[profile_columns], sep = "|"))
+rows_by_group <- split(seq_len(nrow(train)), match(key_tr, unique(key_tr)))
+boot_rows <- function(b) {
+  set.seed(REFIT_SEED + b)
+  unlist(rows_by_group[sample.int(length(rows_by_group), replace = TRUE)], use.names = FALSE)
+}
+
+fit_glm_b <- function(d) glm(formula(glm_freq), family = poisson(link = log), data = d,
+                             model = FALSE, y = FALSE)
+fit_gbm_b <- function(d) {
+  ds  <- lgb.Dataset(prep_matrix(d), label = d$ClaimNb, init_score = log(d$Exposure),
+                     categorical_feature = categorical_features,
+                     params = list(feature_pre_filter = FALSE))
+  cfg <- gbm_lock$selected
+  lgb.train(params = c(base_params, list(num_leaves = cfg$num_leaves,
+                                         min_data_in_leaf = cfg$min_data_in_leaf)),
+            data = ds, nrounds = cfg$best_trees, verbose = -1)
+}
+fit_ann_b <- function(d, b) {
+  cfg <- ann_lock$selected
+  inp <- make_inputs(d)
+  lapply(seq_len(ANN_SEEDS_PER_REFIT), function(k) {
+    set_random_seed(REFIT_SEED + 100 * b + k)
+    m <- build_model(archs[[cfg$arch]], cfg$l2)
+    fit(m, x = inp, y = d$ClaimNb, epochs = cfg$median_epoch,
+        batch_size = BATCH, shuffle = TRUE, verbose = 0)
+    m
+  })
+}
+
+refit_file <- paste0("explain_refit_checkpoint", RUN_TAG, ".rds")
+models_b   <- c("GLM", "GBM_selected", "ANN_selected")
+if (file.exists(refit_file)) {
+  ck <- readRDS(refit_file); phi_refit <- ck$phi; fx_refit <- ck$fx
+  cat("Resuming from replicate", length(phi_refit$GLM) + 1, "\n")
+} else {
+  phi_refit <- setNames(replicate(3, list(), simplify = FALSE), models_b)
+  fx_refit  <- phi_refit
+}
+
+for (b in seq_len(B_REFIT)) {
+  if (b <= length(phi_refit$GLM)) next
+  t0 <- Sys.time()
+  d  <- train[boot_rows(b), ]
+  glm_b <- fit_glm_b(d); gbm_b <- fit_gbm_b(d); ann_b <- fit_ann_b(d, b)
+  fns_b <- list(GLM = make_glm_fn(glm_b), GBM_selected = make_gbm_fn(gbm_b),
+                ANN_selected = make_ann_fn(ann_b))
+  for (m in models_b) {
+    s <- shap_exact(fns_b[[m]], stab_df, bg_main)
+    phi_refit[[m]][[b]] <- s$phi
+    fx_refit[[m]][[b]]  <- s$fx
+  }
+  saveRDS(list(phi = phi_refit, fx = fx_refit), refit_file)
+  rm(d, glm_b, gbm_b, ann_b, fns_b); invisible(gc()); clear_session()
+  cat(sprintf("Refit %d/%d done in %.0fs\n", b, B_REFIT,
+              as.numeric(difftime(Sys.time(), t0, units = "secs"))))
+}
+
+stab_axis2 <- do.call(rbind, lapply(models_b, function(m) {
+  sm <- stability_metrics(phi_refit[[m]])
+  
+  sm$pred_sd <- mean(apply(do.call(cbind, fx_refit[[m]]), 1, sd))   
+  cbind(model = m, sm)
+}))
+cat("\nAxis 2 (data sensitivity, refits):\n"); print(stab_axis2, digits = 3)
+
+# Comparison: Is data sensitivity distinguishable from explainer noise? 
+# A ratio >1 means the refitting moves attributions more
+noise_rel <- stab_axis1$rel_sd[match(models_b, stab_axis1$model)]
+cat("\nRelative SD: refits / explainer noise (axis 2 over axis 1):\n")
+print(round(setNames(stab_axis2$rel_sd / noise_rel, models_b), 2))
+noise_tv <- stab_axis1$profile_tv[match(models_b, stab_axis1$model)]
+cat("\nAttribution-profile distance (reallocation, scale free): refits / explainer noise:\n")
+print(round(setNames(stab_axis2$profile_tv / noise_tv, models_b), 2))
+
+saveRDS(list(stab_axis1 = stab_axis1, stab_axis2 = stab_axis2, 
+             noise_phi = noise_phi, phi_refit = phi_refit, 
+             fx_refit = fx_refit, settings = list(R_NOISE = R_NOISE, B_REFIT = B_REFIT, 
+                                                  ANN_SEEDS_PER_REFIT = ANN_SEEDS_PER_REFIT,
+                                                  SIGN_MIN = SIGN_MIN),
+             created_at = Sys.time()),
+        paste0("explain_shap_stability", RUN_TAG, ".rds"))
+```
+
+### LIME and Summary tables
+
+This script adds the second explanation method in the methodology, LIME.
+This provides a validation of the trends observed with SHAP so that the conclusions reached by the study do not solely rely on one explanation method.
+By default, LIME discretises continuous variables, which may significantly impact explanation stability.
+The study creates a primary approach to binning which entails defining cut-points once per variable in addition to the age bins defined for training the GLM, and then applying them to the models uniformly.
+This approach enables uniformity across model classes, ease of verification for LIME against GLM coefficients, and the actuarial explanations for changes across stable and policy-relevant risk bands.
+However, the study implements sensitivity checks through continuous perturbation (`no_bins`) and the default LIME approach (`default_lime_bins`).
+Having these checks shows whether explanation instability hinges on a binning choice.
+This script measures LIME's surrogate, $R^2$, and a similar removal-based faithfulness measure as the one used for SHAP.
+These measures provide a fair assessment of fidelity from a LIME standpoint and summarises LIME explanations of the same policies with (`stability_metrics`).
+This provides the explainer noise of LIME.
+
+```{r explainability-lime-and-summary-tables, eval = FALSE, include = TRUE, echo = FALSE}
+# ---- LIME ----
+
+require(lime)
+
+required <- c("expl_fns", "lime_df", "bg_main", "train", "feats", "stability_metrics",
+              "faithfulness", "shap_faith_summary", "stab_axis2")
+missing_objs <- required[!sapply(required, exists)]
+if (length(missing_objs) > 0) {
+  stop("Missing from the session: ", paste(missing_objs, collapse = ", "), call. = FALSE)
+}
+
+LIME_MODELS  <- c("GLM", "GBM_selected", "ANN_selected")
+N_PERM       <- if (PILOT) 1000 else 5000   # perturbed samples per explanation
+R_LIME       <- if (PILOT) 3 else 10        # repeated explanations (explainer noise)
+N_LIME_TRAIN <- 5000                        # training rows the explainers learn distributions from
+LIME_SEED    <- 2030
+
+# 1. Primary binning approach---- 
+#    Bins defined once from the training data and saved before 
+#    computing explanations. Ages reuse the GLM's bins; BonusMalusLog has a floor bin plus 
+#    tertiles above it, DensityLog and VehPower use quartiles (repeated edges are merged)
+
+edges_from_bins <- function(x, bin) unname(sort(tapply(x, factor(bin), min))[-1])
+bm <- train$BonusMalusLog
+bm_above <- bm[bm > min(bm)]
+
+bin_edges <- list(
+  DrivAge       = edges_from_bins(train$DrivAge, train$DrivAgeBin),
+  VehAge        = edges_from_bins(train$VehAge,  train$VehAgeBin),
+  BonusMalusLog = c(min(bm_above), quantile(bm_above, c(1/3, 2/3), names = FALSE)),
+  DensityLog    = quantile(train$DensityLog, c(.25, .5, .75), names = FALSE),
+  VehPower      = quantile(train$VehPower,   c(.25, .5, .75), names = FALSE)
+)
+bin_edges <- lapply(bin_edges, function(e) sort(unique(e)))
+
+cutters <- lapply(names(bin_edges), function(f) {
+  e <- bin_edges[[f]]; lab <- paste0(f, "_b", seq_len(length(e) + 1))
+  function(x) cut(x, c(-Inf, e, Inf), labels = lab, right = FALSE)
+})
+names(cutters) <- names(bin_edges)
+
+reps <- lapply(names(cutters), function(f) {
+  r <- tapply(train[[f]], cutters[[f]](train[[f]]), median)
+  # representative raw value of each bin
+  setNames(as.numeric(r), names(r)) 
+})
+names(reps) <- names(cutters)
+
+bin_table <- do.call(rbind, lapply(names(cutters), function(f) {
+  e <- c(-Inf, bin_edges[[f]]); sh <- as.numeric(prop.table(table(cutters[[f]](train[[f]]))))
+  data.frame(feature = f, bin = names(reps[[f]]), lower_edge = e,
+             share_of_train = round(sh, 3), representative = reps[[f]], row.names = NULL)
+}))
+cat("Primary bins (review before continuing):\n"); print(bin_table)
+saveRDS(list(edges = bin_edges, reps = reps, table = bin_table, created_at = Sys.time()),
+        paste0("lime_bins_primary_option", RUN_TAG, ".rds"))
+
+# 2. The 3 lime spaces:----
+#    How a policy is captured into LIME, and how LIME output 
+#    is mapped back into the model
+z_mu <- colMeans(train[continuous_features])
+z_sd <- sapply(train[continuous_features], sd)
+spaces <- list(
+  # FIXED, PRE-SPECIFIED BINS
+  prespecified_bins = list(to = function(df) {
+    for (f in names(cutters)) 
+      df[[f]] <- cutters[[f]](df[[f]]); df 
+    },
+    from = function(df) { 
+      for (f in names(cutters))
+        df[[f]] <- as.numeric(reps[[f]][as.character(df[[f]])]); df }),
+  
+  # LIME DEFAULT (4 QUANTILE BINS)
+  default_lime_bins = list(to = function(df) df, from = function(df) df),
+  
+  # NO BINNING, CONTINUOUS PERTURBATION
+  no_bins = list(to = function(df) { for (f in continuous_features)
+             df[[f]] <- (df[[f]] - z_mu[[f]]) / z_sd[[f]]; df },
+           from = function(df) { for (f in continuous_features)
+             df[[f]] <- df[[f]] * z_sd[[f]] + z_mu[[f]]; df })
+)
+
+# lime needs a model class with two methods
+model_type.lograte_model    <- function(x, ...) "regression"
+predict_model.lograte_model <- function(x, newdata, type, ...) {
+  data.frame(Response = x$predict(as.data.frame(newdata)))
+}
+registerS3method("model_type",    "lograte_model", model_type.lograte_model,    envir = asNamespace("lime"))
+registerS3method("predict_model", "lograte_model", predict_model.lograte_model, envir = asNamespace("lime"))
+
+make_lime_model <- function(model_name, scheme) {
+  structure(list(predict = function(d) expl_fns[[model_name]](spaces[[scheme]]$from(d))),
+            class = "lograte_model")
+}
+
+set.seed(LIME_SEED)
+lime_train_raw <- train[sample.int(nrow(train), N_LIME_TRAIN), feats]
+make_explainer <- function(scheme, mdl) {
+  tr <- spaces[[scheme]]$to(lime_train_raw)
+  switch(scheme,
+         # features are already binned factors
+         prespecified_bins = lime::lime(tr, mdl, bin_continuous = FALSE),   
+         default_lime_bins = lime::lime(tr, mdl, bin_continuous = TRUE, 
+                                        n_bins = 4, quantile_bins = TRUE),
+         no_bins = lime::lime(tr, mdl, bin_continuous = FALSE))
+}
+
+lime_weights <- function(expl, x_sp, seed) {
+  set.seed(seed)
+  out <- lime::explain(x_sp, expl, n_features = length(feats), n_permutations = N_PERM,
+                       feature_select = "none")
+  w <- matrix(NA_real_, nrow(x_sp), length(feats), dimnames = list(NULL, feats))
+  w[cbind(match(as.character(out$case), rownames(x_sp)), match(out$feature, feats))] <-
+    out$feature_weight
+  r2 <- tapply(out$model_r2, out$case, mean)[rownames(x_sp)]
+  list(w = w, r2 = as.numeric(r2))
+}
+
+# 3. Run LIME, Fidelity, and Stability
+lime_rows <- list(); lime_w1 <- list()
+for (scheme in c("prespecified_bins", "default_lime_bins", "no_bins")) {
+  for (m in LIME_MODELS) {
+    cat(sprintf("LIME scheme %s, model %s\n", scheme, m))
+    ex <- tryCatch(make_explainer(scheme, make_lime_model(m, scheme)),
+                   error = function(e) { 
+                     message("  explainer failed: ",
+                             conditionMessage(e)); NULL })
+    if (is.null(ex)) next
+    x_sp <- spaces[[scheme]]$to(lime_df); 
+    rownames(x_sp) <- as.character(seq_len(nrow(x_sp)))
+    runs <- tryCatch(lapply(seq_len(R_LIME), 
+                            function(r) lime_weights(ex, x_sp, LIME_SEED + r)),
+                     error = function(e) { message("  explain failed: ",
+                                                   conditionMessage(e)); NULL })
+    if (is.null(runs)) next
+
+    faith_cor <- NA_real_
+    # attributions are comparable to feature removal only for binned schemes
+    if (scheme %in% c("prespecified_bins", "default_lime_bins")) {   
+      pf <- function(d) expl_fns[[m]](spaces[[scheme]]$from(d))
+      fc <- faithfulness(pf, x_sp, spaces[[scheme]]$to(bg_main), runs[[1]]$w)
+      faith_cor <- mean(fc$cor, na.rm = TRUE)
+    }
+    st <- stability_metrics(lapply(runs, `[[`, "w"))
+    lime_rows[[paste(scheme, m)]] <- cbind(scheme = scheme, model = m,
+                                           lime_r2 = mean(sapply(runs, function(r) 
+                                             mean(r$r2, na.rm = TRUE))),
+                                           lime_faith_cor = faith_cor, st)
+    lime_w1[[paste(scheme, m)]] <- runs[[1]]$w
+  }
+}
+lime_summary <- do.call(rbind, lime_rows); 
+rownames(lime_summary) <- NULL
+cat("\nLIME summary (explainer-noise stability; 
+    D weights are per standard deviation):\n")
+print(lime_summary[, c("scheme", "model", "lime_r2", "lime_faith_cor", 
+                       "global_rank_cor", "top3_overlap", "local_rank_cor", 
+                       "rel_sd", "sign_agreement")], digits = 3)
+
+# Do conclusions survive a change of binning? (rows = scheme, columns = model)
+cat("\nLocal rank correlation by scheme and model:\n")
+print(round(with(lime_summary, tapply(local_rank_cor, list(scheme, model), identity)), 3))
+cat("\nLIME surrogate R2 by scheme and model:\n")
+print(round(with(lime_summary, tapply(lime_r2, list(scheme, model), identity)), 3))
+
+# 4. Summaries
+
+res_file <- "final_evaluation_results.rds"
+if (file.exists(res_file)) {
+  ev   <- readRDS(res_file)
+  perf <- ev$metrics[ev$metrics$set == "test", c("model", "deviance", "gini")]
+  cx   <- ev$complexity[, c("model", "measure", "value")]
+  primary_lime <- lime_summary[lime_summary$scheme == "prespecified_bins", 
+                               c("model", "lime_r2", "lime_faith_cor")]
+  rq1 <- Reduce(function(a, b) merge(a, b, by = "model", all.x = TRUE),
+                list(perf, cx, shap_faith_summary[, c("model", "faith_cor", 
+                                                      "faith_rmse")], primary_lime))
+  rq1 <- rq1[match(names(expl_fns), rq1$model), ]
+  rownames(rq1) <- NULL
+  cat("\nRQ1: performance and explanation fidelity (LIME columns use Prespecified Bins):\n")
+  print(rq1, digits = 4)
+
+  op <- par(mar = c(4.5, 4.5, 1, 1))
+  plot(rq1$deviance, 
+       rq1$faith_cor, 
+       pch = 19, 
+       xlab = "Test deviance (lower is better)",
+       ylab = "SHAP faithfulness (correlation)", 
+       xlim = rev(range(rq1$deviance)) )
+  text(rq1$deviance, rq1$faith_cor, rq1$model, pos = 3, cex = 0.8)
+  par(op)
+} else {
+  rq1 <- NULL
+  warning(res_file, " not found in ", 
+          getwd(), ": RQ1 table skipped.")
+}
+
+cat("\nRQ3: SHAP stability under data resampling (axis 2):\n"); 
+print(stab_axis2, digits = 3)
+
+saveRDS(list(lime_summary = lime_summary, lime_weights_first_run = lime_w1,
+             bin_table = bin_table, rq1 = rq1, rq3 = stab_axis2,
+             settings = list(N_PERM = N_PERM, R_LIME = R_LIME, LIME_MODELS = LIME_MODELS,
+                             LIME_SEED = LIME_SEED),
+             created_at = Sys.time()),
+        paste0("explain_lime_and_summary", RUN_TAG, ".rds"))
+
+```
+
+```{r follow-ups, eval=FALSE, include=TRUE, echo=FALSE}
+
+# The floor sanity check (GLM)
+tt <- glm_terms(train[sample.int(nrow(train), 20000), feats])
+c(theory = mean(apply(tt, 2, sd)) / sqrt(B_BG), 
+  observed = stab_axis1$mean_sd_phi[stab_axis1$model == "GLM"])
+
+# Seed-only axis for the AN
+seed_phi  <- lapply(ann_selected_models, 
+                    function(m) shap_exact(make_ann_fn(list(m)), 
+                                           stab_df, 
+                                           bg_main)$phi)
+seed_only <- stability_metrics(seed_phi)
+rbind(seed_only_5_networks = seed_only, 
+      refit_axis2_ANN = stab_axis2[stab_axis2$model == "ANN_selected", 
+                                   names(seed_only)])
+
+# Intervals and the right conditioning
+models_b <- c("GLM", "GBM_selected", "ANN_selected")
+psd <- function(l) rowMeans(apply(array(unlist(l), 
+                                        c(nrow(l[[1]]), ncol(l[[1]]), 
+                                          length(l))), c(1, 2), sd))
+sd2 <- lapply(phi_refit[models_b], psd); 
+sd1 <- lapply(noise_phi[models_b], psd)
+set.seed(2031)
+round(sapply(models_b, function(m) { 
+  r <- replicate(2000, { 
+    i <- sample(100, replace = TRUE); mean(sd2[[m]][i]) / mean(sd1[[m]][i]) 
+    })
+ c(ratio = mean(sd2[[m]]) / mean(sd1[[m]]), 
+   lo = unname(quantile(r, .025)), 
+   hi = unname(quantile(r, .975))) }), 2)
+sum_sd <- sapply(models_b, 
+                 function(m) mean(apply(sapply(phi_refit[[m]], 
+                                               rowSums), 1, sd))); 
+round(sum_sd, 4)
+
+
+vmean <- function(l) 
+  mean(apply(array(unlist(l), 
+                   c(nrow(l[[1]]), ncol(l[[1]]), length(l))), c(1, 2), var))
+v_seed <- vmean(seed_phi); v_refit <- vmean(phi_refit$ANN_selected)
+c(seed_share = v_seed / v_refit, data_sd = sqrt(v_refit - v_seed),
+  ensemble_equiv_sd = sqrt(v_refit - v_seed + v_seed / 5))
+
+set.seed(2032)
+rel <- sapply(c("GBM_selected", "ANN_selected"), function(m) {
+  r <- replicate(2000, { i <- sample(length(sd2$GLM), replace = TRUE)
+                         mean(sd2[[m]][i]) / mean(sd2$GLM[i]) })
+  c(ratio = mean(sd2[[m]]) / mean(sd2$GLM), lo = unname(quantile(r, .025)), hi = unname(quantile(r, .975)))
+})
+round(rel, 2)
+
+saveRDS(list(seed_phi = seed_phi, 
+             seed_only = seed_only, 
+             seed_share = v_seed / v_refit, 
+             data_sd = sqrt(v_refit - v_seed), 
+             ensemble_equiv_sd = sqrt(v_refit - v_seed + v_seed / 5), 
+             two_level = if (exists("two_level")) two_level, 
+             saved_at = Sys.time()), "explain_ann_decomposition.rds")
+```

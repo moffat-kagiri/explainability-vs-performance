@@ -17,7 +17,15 @@ Mann (2003) discusses the 3 approaches typically used in actuarial research: cro
 Luteijn et al. (2025) provides a point of reference for research methods and risks to mitigate in actuarial research, particularly regarding the dataset to be used or sampled. They recommend using the FAIR principles and point out some potential pitfalls to look out for. FAIR stands for find-able, accessible, interoperable, and reproducible, the standards of data integrity and reproducibility to enforce. Following these principles ensures that the findings of actuarial research are reliable and stable and that under similar conditions, the analyses carried out can be replicated and produce similar findings(Wilkinson et al., 2016).
 
 ```{r setup, include = FALSE, echo = FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(
+  dpi = 600,
+  out.width = "100%",
+  fig.width = 7.5,
+  fig.height = 4.5,
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
 require(MASS)
 require(tidyverse)
 require(dplyr)

@@ -1,0 +1,131 @@
+---
+title: "Findings Compilation"
+author: "Moffat Kagiri Ngugi"
+date: "`r Sys.Date()`"
+output: word_document
+---
+
+```{r setup, include = FALSE, echo = FALSE}
+knitr::opts_chunk$set(
+  dpi = 600,
+  out.width = "100%",
+  fig.width = 7.5,
+  fig.height = 4.5,
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+require(MASS)
+require(tidyverse)
+require(dplyr)
+require(ggplot2)
+require(gridExtra)
+require(patchwork)
+require(sf)
+require(rnaturalearth)
+require(rnaturalearthhires)
+require(stringi)
+require(plotly)
+require(shapr)
+require(lime)
+
+# Load workspace from previous chapter
+ev   <- readRDS("final_evaluation_results.rds")
+shp  <- readRDS("explain_shap_main.rds")
+stab <- readRDS("explain_shap_stability.rds")
+lm_  <- readRDS("explain_lime_and_summary.rds")
+dec  <- readRDS("explain_ann_decomposition.rds")
+```
+
+## Chapter 4: Findings
+
+This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses discusses, building up to the creation of the decision framework aiding model selection.
+
+### Predictive Performance Results
+
+The results from the comparative analysis in the methodology chapter shed light on the varied predictive performance in the predictive algorithms under review.
+
+```{r eval-load, include=FALSE, echo=FALSE}
+results_file <- "final_evaluation_results.rds" 
+
+if (!file.exists(results_file)) {
+  stop("Run the evaluation first: ",
+       results_file, " not found in ", 
+       getwd()) 
+}
+
+eval_res <- readRDS(results_file)  
+
+model_labels <- c(GLM = "GLM",
+                  GBM_selected = "GBM (selected)",                   
+                  GBM_sensitivity = "GBM (sensitivity)",
+                  ANN_selected    = "ANN (selected)", 
+                  ANN_sensitivity = "ANN (sensitivity)") 
+
+lab <- function(x) unname(model_labels[as.character(x)]) 
+fmt <- function(x, d = 4) formatC(x, format = "f", digits = d)
+```
+
+Deviance is measured as the mean Poisson deviance per row and calibration refers to the ratio of predicted to observed claims. Complexity units are counted differently for every model class and are not comparable across them as they refer to different items.
+
+```{r tab-complexity, echo=FALSE}
+cx <- eval_res$complexity 
+
+knitr::kable(
+  data.frame(Model = lab(cx$model),
+             Measure    = cx$measure, 
+             Complexity = format(cx$value, big.mark = ",", trim = TRUE)),   align = "llr", row.names = FALSE,   
+  caption = "Model Complexity"
+)
+```
+
+Specifically, complexity units for the GLM are coefficients, number of leaves for the boosting machines, and trainable parameters for the neural network. A trend appears in the ranking for both the mean Poisson deviance per row and Gini in the test evaluation, ordering the model classes as GBM, then ANN, then GLM. GBM has a deviance of 0.2424 and Gini of 0.3297, followed by the ANN with 0.2459 and Gini at 0.3133, and then the GLM at 0.2488 with Gini of 0.2795.
+
+```{r tab-test-performance, echo=FALSE}
+te <- eval_res$metrics[eval_res$metrics$set == "test", ] 
+
+knitr::kable(
+  data.frame(Model = lab(te$model),
+             Deviance = fmt(te$deviance),
+             `Log-likelihood` = fmt(te$loglik),
+             `Gini Coefficient` = fmt(te$gini, 4),
+             Calibration = fmt(te$calibration, 4),
+             check.names = FALSE),
+  align = "lrrrr", row.names = FALSE,
+  caption = paste("Test-set performance") )
+```
+
+The paired group bootstrap differences indicate that the machine learning models outperform the GLM, and that the GBM outperforms the ANN, albeit with modest improvements. The table below demonstrates these differences.
+
+```{r tab-paired, echo=FALSE}
+pd <- eval_res$diff_table
+
+knitr::kable(
+  data.frame(Comparison = paste(lab(pd$first), "vs", lab(pd$second)),
+             `Difference in deviance (95% CI)` = 
+               sprintf("%.4f (%.4f, %.4f)", pd$diff, pd$lo, pd$hi),
+             `Share of resamples where first is better` =
+               sprintf("%.1f%%", 100 * pd$share_first_better),
+             check.names = FALSE),
+  align = "lrr",
+  row.names = FALSE,
+  caption = paste("Paired differences in mean test deviance (first minus second; negative means the", "first model is better), with 95% group-bootstrap intervals.")
+)
+```
+
+### Explainability
+
+#### Explanation Fidelity Results
+
+#### Explanation Stability Results
+
+`stability_metrics` defines a number of stability metrics that capture different aspects of the change in SHAP explanations.
+
+1.  **Global rank correlation**: Shows whether the ranking of the feature feature importance is preserved across refits.
+2.  **Local rank correlation**: Shows whether the ordering of features is preserved for individual policies
+3.  **Profile distance**: Captures scale free reallocation, which is a measure of the movement of total attributions between drivers. 0 means that the attributions are identical, and 1 means that the attributions are disjoint
+4.  **SD of attributions**: This measures the variation of a feature's contribution, in log units, or for the premium equivalent, as a vectored percentage change in premium
+5.  **Relative SD**: Variation scaled by the typical size of an attribution
+6.  **Sign agreement**: This captures how often a material contribution keeps its direction
+
+### Decision Matrix
