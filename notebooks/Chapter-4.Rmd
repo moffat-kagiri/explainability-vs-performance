@@ -28,33 +28,19 @@ require(stringi)
 require(plotly)
 require(shapr)
 require(lime)
-
-# Load workspace from previous chapter
-ev   <- readRDS("final_evaluation_results.rds")
-shp  <- readRDS("explain_shap_main.rds")
-stab <- readRDS("explain_shap_stability.rds")
-lm_  <- readRDS("explain_lime_and_summary.rds")
-dec  <- readRDS("explain_ann_decomposition.rds")
 ```
 
 ## Chapter 4: Findings
 
 This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses discusses, building up to the creation of the decision framework aiding model selection.
 
-### Predictive Performance Results
-
-The results from the comparative analysis in the methodology chapter shed light on the varied predictive performance in the predictive algorithms under review.
-
 ```{r eval-load, include=FALSE, echo=FALSE}
-results_file <- "final_evaluation_results.rds" 
-
-if (!file.exists(results_file)) {
-  stop("Run the evaluation first: ",
-       results_file, " not found in ", 
-       getwd()) 
-}
-
-eval_res <- readRDS(results_file)  
+# Load workspace from previous chapter
+ev   <- readRDS("final_evaluation_results.rds")
+shp  <- readRDS("explain_shap_main.rds")
+stab <- readRDS("explain_shap_stability.rds")
+lm_  <- readRDS("explain_lime_and_summary.rds")
+dec  <- readRDS("explain_ann_decomposition.rds")
 
 model_labels <- c(GLM = "GLM",
                   GBM_selected = "GBM (selected)",                   
@@ -66,10 +52,42 @@ lab <- function(x) unname(model_labels[as.character(x)])
 fmt <- function(x, d = 4) formatC(x, format = "f", digits = d)
 ```
 
-Deviance is measured as the mean Poisson deviance per row and calibration refers to the ratio of predicted to observed claims. Complexity units are counted differently for every model class and are not comparable across them as they refer to different items.
+### Predictive Performance Results
+
+The accuracy of the models tested in the methodology chapter is measured in 4 ways: deviance, log-likelihood, Gini coefficient, and calibration. Mean Poisson deviance is a uniquely suited measure of predictive accuracy as it punishes near-zero predictions and underestimated small true counts, more than over-predictions of large counts. The mean Poisson log–likelihood estimates the probability of predicting the actual number of events under scrutiny, and then averages the logarithm of this probability over all the data. The exposure weighted Gini index scores the effectiveness of each model at predicting the claim counts, adjusted for the respective exposure levels. Calibration refers to the ratio of predicted to observed claims. A score of 1 implies that the model is unbiased in estimating the number of claims.
+
+```{metrics, echo=TRUE, eval=FALSE}
+# Metrics
+dev_terms <- function(y, mu) 2*(ifelse(y>0, y*log(y/mu), 0) - (y-mu))
+poisson_deviance <- function(y, mu) mean(dev_terms(y, mu))
+poisson_loglik   <- function(y, mu) mean(dpois(y, mu, log = TRUE))
+
+# Exposure-weighted Gini
+
+gini_lorenz <- function(y, mu_vec, expo) {
+  ord <- order(mu_vec/expo)
+  x <- c(0, cumsum(expo[ord])/sum(expo))
+  l <- c(0, cumsum(y[ord])/sum(y))
+  n <- length(x)
+  auc <- sum((x[-1] - x[-n]) * (l[-1] + l[-n]) / 2)
+  1-2*auc
+}
+
+metric_row <- function(model, set, df, mu_vec) {
+  data.frame(model       = model, 
+             set         = set, 
+             deviance    = poisson_deviance(df$ClaimNb, mu_vec),
+             loglik      = poisson_loglik(df$ClaimNb, mu_vec),
+             calibration = sum(mu_vec)/sum(df$ClaimNb), # predicted/observed
+             gini        = gini_lorenz(df$ClaimNb, mu_vec, df$Exposure)
+  )
+}
+```
+
+Complexity units are counted differently for every model class and are not comparable across them as they refer to different items. Specifically, complexity units for the GLM are coefficients, number of leaves for the boosting machines, and trainable parameters for the neural network. The table below summarises the complexity of the five models.
 
 ```{r tab-complexity, echo=FALSE}
-cx <- eval_res$complexity 
+cx <- ev$complexity 
 
 knitr::kable(
   data.frame(Model = lab(cx$model),
@@ -79,26 +97,26 @@ knitr::kable(
 )
 ```
 
-Specifically, complexity units for the GLM are coefficients, number of leaves for the boosting machines, and trainable parameters for the neural network. A trend appears in the ranking for both the mean Poisson deviance per row and Gini in the test evaluation, ordering the model classes as GBM, then ANN, then GLM. GBM has a deviance of 0.2424 and Gini of 0.3297, followed by the ANN with 0.2459 and Gini at 0.3133, and then the GLM at 0.2488 with Gini of 0.2795.
+The study ranks the predictive performance of the model classes as GBM, then ANN, then GLM. This trend in the selected model scores in the four measures is summarised in the table below. The sensitivity models are included to test whether the configuration choice outweighs model choice in determining the predictive performance of the respective models. However, they follow the same trend described above, with the GBM sensitivity model scoring 0.2427 and the ANN sensitivity scoring 0.2454 on deviance. This means that the configuration choice does not affect the ranking of the model classes.
 
 ```{r tab-test-performance, echo=FALSE}
-te <- eval_res$metrics[eval_res$metrics$set == "test", ] 
-
+te <- ev$metrics[ev$metrics$set == "test", ]
 knitr::kable(
-  data.frame(Model = lab(te$model),
-             Deviance = fmt(te$deviance),
-             `Log-likelihood` = fmt(te$loglik),
+  data.frame(Model              = lab(te$model),
+             Deviance           = fmt(te$deviance),
+             `Log-likelihood`   = fmt(te$loglik),
              `Gini Coefficient` = fmt(te$gini, 4),
-             Calibration = fmt(te$calibration, 4),
+             Calibration        = fmt(te$calibration, 4),
              check.names = FALSE),
   align = "lrrrr", row.names = FALSE,
-  caption = paste("Test-set performance") )
+  caption = paste("Test-set performance")
+)
 ```
 
-The paired group bootstrap differences indicate that the machine learning models outperform the GLM, and that the GBM outperforms the ANN, albeit with modest improvements. The table below demonstrates these differences.
+The study compares the models in pairs to validate the consistency of the deviance ranking above on the same test policies. The table below summarises this comparison. For instance, the selected GBM outperforms the GLM by 2.6% given by the 0.0064 difference in deviance on a 95% confidence interval where the two have a deviance of 0.0037 to 0.0108. Similarly, the selected ANN improves on the GLM by 1.1% and the selected GBM improves on the ANN by 1.4%. The ranking is preserved by the sensitivity configurations. However, the differences between the configurations within models is insignificant, meaning that the simplicity rule applied as part of hyperparameter tuning does not affect predictive accuracy on held-out data.
 
 ```{r tab-paired, echo=FALSE}
-pd <- eval_res$diff_table
+pd <- ev$diff_table
 
 knitr::kable(
   data.frame(Comparison = paste(lab(pd$first), "vs", lab(pd$second)),
@@ -113,11 +131,245 @@ knitr::kable(
 )
 ```
 
+The study also reviews the train-test gap in accuracy, which defines overfitting in the study. The deviance gap, as illustrated in the table below, is larger in more flexible models. The gap ranges between 0.0075 and 0.0113 across all five models. This gap indicates minimal overfitting as the GLM is completely deterministic. Measuring against it as a benchmark, the models show an even narrower gap, 0.002 and 0.004 for the GBM and 0.001 for both ANNs. As per the discussion in the literature review, overfitting tends to follow the same order as predictive accuracy. Gini index shows a similar trend, albeit with a much smaller gap between train and test runs. ANN, for instance, shows differences in the third decimal place when adjusted with the gap in the GLM.
+
+```{r tab-train-test, echo=FALSE}
+m  <- ev$metrics
+tr <- m[m$set == "train", ]
+te <- m[m$set == "test", ]
+te <- te[match(tr$model, te$model), ]
+knitr::kable(
+  data.frame(Model             = lab(tr$model),
+             `Train deviance`  = fmt(tr$deviance),
+             `Test deviance`   = fmt(te$deviance),
+             `Deviance gap`    = fmt(te$deviance - tr$deviance),
+             `Train Gini`      = fmt(tr$gini, 3),
+             `Test Gini`       = fmt(te$gini, 3),
+             `Gini gap`        = fmt(tr$gini - te$gini, 3),
+             check.names = FALSE),
+  align = "lrrrrrr", row.names = FALSE,
+  caption = "Training and test performance by model. Gaps are test minus train deviance and train minus test Gini."
+)
+```
+
 ### Explainability
 
 #### Explanation Fidelity Results
 
+
+```{r tab-shap-fidelity-summary, echo=FALSE}
+fidelity <- shp$shap_faith_summary
+
+knitr::kable(
+  data.frame(
+    Model = lab(fidelity$model),
+    `Mean fidelity correlation` = fmt(fidelity$faith_cor, 3),
+    `Correlation standard error` = fmt(fidelity$faith_cor_se, 3),
+    `Mean RMSE` = fmt(fidelity$faith_rmse, 4),
+    check.names = FALSE
+  ),
+  align = "lrrr",
+  row.names = FALSE,
+  caption = paste(
+    "SHAP fidelity averaged across explained test policies.",
+    "Correlation measures association between SHAP attribution sums and",
+    "prediction drops under background-value masking; RMSE measures their",
+    "average difference on the log-frequency scale."
+  )
+)
+```
+
+
+```{r tab-shap-fidelity-by-risk-decile, echo=FALSE}
+decile_matrix <- shp$shap_faith_decile
+
+fidelity_decile <- data.frame(
+  `Predicted-risk decile` = as.integer(rownames(decile_matrix)),
+  decile_matrix,
+  check.names = FALSE
+)
+fidelity_decile <- fidelity_decile[
+  order(fidelity_decile$`Predicted-risk decile`),
+  ,
+  drop = FALSE
+]
+
+model_columns <- setdiff(names(fidelity_decile), "Predicted-risk decile")
+
+fidelity_decile[model_columns] <- lapply(
+  fidelity_decile[model_columns],
+  fmt,
+  d = 3
+)
+names(fidelity_decile)[match(model_columns, names(fidelity_decile))] <-
+  lab(model_columns)
+
+knitr::kable(
+  fidelity_decile,
+  align = c("r", rep("r", length(model_columns))),
+  row.names = FALSE,
+  caption = paste(
+    "Mean SHAP fidelity correlation by predicted-risk decile.",
+    "Deciles are defined using GBM-selected predicted risk."
+  )
+)
+```
+
+```{r tab-rq1-performance-and-fidelity, echo=FALSE}
+rq1 <- lm_$rq1
+
+knitr::kable(
+  data.frame(
+    Model = lab(rq1$model),
+    `Complexity measure` = rq1$measure,
+    `Complexity value` = format(rq1$value, big.mark = ",", trim = TRUE),
+    `Test deviance` = fmt(rq1$deviance),
+    `Test Gini` = fmt(rq1$gini),
+    `SHAP faithfulness correlation` = fmt(rq1$faith_cor),
+    `SHAP faithfulness RMSE` = fmt(rq1$faith_rmse),
+    `LIME surrogate R-squared` = fmt(rq1$lime_r2),
+    `LIME faithfulness correlation` = ifelse(
+      is.na(rq1$lime_faith_cor), "Not assessed", fmt(rq1$lime_faith_cor)
+    ),
+    check.names = FALSE
+  ),
+  align = "llrrrrrrr",
+  row.names = FALSE,
+  caption = paste(
+    "Test performance, model complexity, and explanation fidelity.",
+    "LIME results use prespecified bins."
+  )
+)
+```
+
+
 #### Explanation Stability Results
+
+```{r tab-lime-bin-specification, echo=FALSE}
+bins <- lm_$bin_table
+
+knitr::kable(
+  data.frame(
+    Feature = bins$feature,
+    Bin = bins$bin,
+    `Lower edge` = bins$lower_edge,
+    `Share of training data` = sprintf("%.1f%%", 100 * bins$share_of_train),
+    `Representative value` = fmt(bins$representative),
+    check.names = FALSE
+  ),
+  align = "llrrr",
+  row.names = FALSE,
+  caption = "Prespecified LIME bins, training-data shares, and representative values."
+)
+```
+
+
+```{r tab-lime-metrics, echo=FALSE}
+lime <- lm_$lime_summary
+scheme_labels <- c(
+  prespecified_bins = "Prespecified bins",
+  default_lime_bins = "LIME default bins",
+  no_bins = "No binning"
+)
+
+knitr::kable(
+  data.frame(
+    Scheme = unname(scheme_labels[as.character(lime$scheme)]),
+    Model = lab(lime$model),
+    `Surrogate R-squared` = fmt(lime$lime_r2, 3),
+    `Faithfulness correlation` = ifelse(
+      is.na(lime$lime_faith_cor), "Not assessed", fmt(lime$lime_faith_cor, 3)
+    ),
+    `Global importance rank correlation` = fmt(lime$global_rank_cor, 3),
+    `Top-three overlap` = sprintf("%.1f%%", 100 * lime$top3_overlap),
+    `Local rank correlation` = fmt(lime$local_rank_cor, 3),
+    `Relative attribution SD` = fmt(lime$rel_sd, 3),
+    `Sign agreement` = sprintf("%.1f%%", 100 * lime$sign_agreement),
+    check.names = FALSE
+  ),
+  align = "llrrrrrrr",
+  row.names = FALSE,
+  caption = paste(
+    "LIME surrogate fit, faithfulness, and stability by binning scheme and model.",
+    "Higher values indicate greater agreement or stability, except relative attribution SD,",
+    "for which lower values indicate less variation."
+  )
+)
+```
+
+
+```{r tab-lime-local-rank-by-scheme, echo=FALSE}
+rank_mat <- with(
+  lime,
+  tapply(local_rank_cor, list(scheme, model), identity)
+)
+rank_display <- apply(rank_mat, c(1, 2), fmt)
+
+rank_table <- data.frame(
+  Scheme = unname(scheme_labels[rownames(rank_mat)]),
+  rank_display,
+  check.names = FALSE
+)
+names(rank_table)[-1] <- lab(colnames(rank_mat))
+
+knitr::kable(
+  rank_table,
+  align = c("l", rep("r", ncol(rank_table) - 1)),
+  row.names = FALSE,
+  caption = "Mean local feature-rank correlation across repeated LIME explanations."
+)
+```
+
+
+
+```{r tab-lime-surrogate-r2-by-scheme, echo=FALSE}
+r2_mat <- with(
+  lime,
+  tapply(lime_r2, list(scheme, model), identity)
+)
+r2_display <- apply(r2_mat, c(1, 2), fmt)
+
+r2_table <- data.frame(
+  Scheme = unname(scheme_labels[rownames(r2_mat)]),
+  r2_display,
+  check.names = FALSE
+)
+names(r2_table)[-1] <- lab(colnames(r2_mat))
+
+knitr::kable(
+  r2_table,
+  align = c("l", rep("r", ncol(r2_table) - 1)),
+  row.names = FALSE,
+  caption = "Mean LIME surrogate R-squared by binning scheme and model."
+)
+```
+
+```{r tab-shap-stability-under-refits, echo=FALSE}
+stability <- lm_$rq3
+
+knitr::kable(
+  data.frame(
+    Model = lab(stability$model),
+    Refits = stability$R,
+    `Global rank correlation` = fmt(stability$global_rank_cor, 3),
+    `Top-three overlap` = sprintf("%.1f%%", 100 * stability$top3_overlap),
+    `Local rank correlation` = fmt(stability$local_rank_cor, 3),
+    `Attribution profile distance` = fmt(stability$profile_tv, 3),
+    `Mean attribution SD (log scale)` = fmt(stability$mean_sd_phi, 4),
+    `Premium-equivalent SD` = sprintf("%.2f%%", 100 * stability$premium_equiv),
+    `Relative attribution SD` = fmt(stability$rel_sd, 3),
+    `Sign agreement` = sprintf("%.1f%%", 100 * stability$sign_agreement),
+    `Mean prediction SD (log scale)` = fmt(stability$pred_sd, 4),
+    check.names = FALSE
+  ),
+  align = "lr",
+  row.names = FALSE,
+  caption = "SHAP stability metrics for models refitted on grouped bootstrap samples."
+)
+```
+
+
+
 
 `stability_metrics` defines a number of stability metrics that capture different aspects of the change in SHAP explanations.
 
@@ -129,3 +381,7 @@ knitr::kable(
 6.  **Sign agreement**: This captures how often a material contribution keeps its direction
 
 ### Decision Matrix
+
+### Limitations
+
+Although the study designed this methodology to lend the conclusions as much validity as would be expected for its utility, there are some loopholes that are critical to note as the context for its conclusions or for a future study seeking to validate the findings and conclusions herein. First, the marginal value function evaluates unrealistic feature combinations when the variables represented are dependent. Slack et al. discuss this drawback in better detail and demonstrate how perturbation-based explanations are susceptible when explaining such features as area and density, or bonus-malus and age in `freMTPL2freq`. The study also works with small, and arguably insufficient samples such as 300 policies for explanations, 100 for SHAP stability, and 30 refits. While these samples are consistently applied, the study's conclusions may be hindered by the small sample. Given more liberal constraints of computing capabilities, the study would earn more validity supported by the law of large numbers. Another limitation is the small set of points available to exhaustively answer the first research question regarding co-variation, rather than a simple trend. Having only five model points to assess, the study cannot make a definitive inference regarding the co-variation of predictive accuracy and explainability. While fixed hyperparameters enable a better assessment of explanation stability, they conceal the data sensitivity of tuning from the analysis altogether. The limited dimensionality of the data and the use of a single split also limits how much the conclusions made in the study can be generalized.
