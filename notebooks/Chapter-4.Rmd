@@ -28,11 +28,12 @@ require(stringi)
 require(plotly)
 require(shapr)
 require(lime)
+require(flextable)
 ```
 
 ## Chapter 4: Findings
 
-This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses discusses, building up to the creation of the decision framework aiding model selection.
+This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses, building up to the creation of the decision framework aiding model selection. These analyses include the predictive performance, explanation fidelity, explanation stability, and the synthesis of these three into a decision framework matrix. The chapter bases all comparisons on the 5 models ran in chapter 3, listed in the table below. They are described with their respective complexity measures, although the measures are model-specific and do not show relative complexity across the models.
 
 ```{r eval-load, include=FALSE, echo=FALSE}
 # Load workspace from previous chapter
@@ -50,13 +51,114 @@ model_labels <- c(GLM = "GLM",
 
 lab <- function(x) unname(model_labels[as.character(x)]) 
 fmt <- function(x, d = 4) formatC(x, format = "f", digits = d)
+
+
+gbm_lock <- readRDS("model_selection_locked.rds") # grouped GBM grid and the two locked choices
+ann_lock <- readRDS("ann_selection_locked.rds")    # ANN grid and the two locked choices
+
+# ------------ Define Styles and Other Methods for Plots ------------
+
+SAVE_FIGS <- FALSE   # TRUE writes 300-dpi PNGs to ./figures 
+save_fig <- function(p, name, w = 6.5, h = 4) {
+  if (SAVE_FIGS) {
+    dir.create("figures", showWarnings = FALSE)
+    ggsave(file.path("figures", paste0(name, ".png")), p, width = w, height = h, dpi = 300)
+  }
+  invisible(p)
+}
+
+map_low    <- "#E0F7FA"
+map_high   <- "#0288D1"
+map_na     <- "#ECEFF1"
+blue_dark  <- "#01579B"   # darker shade of map's high colour (text, GLM)
+blue_mid   <- map_high
+blue_light <- "#B3E5FC"   # between the map's low and high colours
+blue_grid  <- map_na
+
+# Model colours: dark blue = GLM, blues = GBM, teal = ANN (five shades of
+# one hue cannot be told apart reliably, so shapes and line types repeat 
+# the distinction)
+model_order  <- c("GLM", 
+                  "GBM_selected", 
+                  "GBM_sensitivity", 
+                  "ANN_selected", 
+                  "ANN_sensitivity")
+model_labels <- c(GLM = "GLM", GBM_selected = "GBM (selected)",
+                  GBM_sensitivity = "GBM (sensitivity)",
+                  ANN_selected = "ANN (selected)", 
+                  ANN_sensitivity = "ANN (sensitivity)")
+pal <- c("GLM" = blue_dark, 
+         "GBM (selected)" = blue_mid, 
+         "GBM (sensitivity)" = "#4FC3F7",
+         "ANN (selected)" = "#00838F", 
+         "ANN (sensitivity)" = "#80DEEA")
+shapes <- c("GLM" = 16, 
+            "GBM (selected)" = 17, 
+            "GBM (sensitivity)" = 2,
+            "ANN (selected)" = 15, 
+            "ANN (sensitivity)" = 0)
+ltypes <- c("GLM" = "solid", 
+            "GBM (selected)" = "solid", 
+            "GBM (sensitivity)" = "dashed",
+            "ANN (selected)" = "solid", 
+            "ANN (sensitivity)" = "dashed")
+lab <- function(x) factor(unname(model_labels[as.character(x)]), 
+                          levels = unname(model_labels))
+
+# "sans" maps to Arial on Windows
+base_theme <- theme_minimal(base_size = 11, base_family = "sans") +
+  theme(legend.position = "bottom", legend.title = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = blue_grid),
+        strip.text = element_text(colour = blue_dark, face = "bold"),
+        axis.text = element_text(colour = "grey25"))
+
+# Shared scales for the model palette
+scale_model <- function() list(scale_colour_manual(values = pal),
+                               scale_shape_manual(values = shapes),
+                               scale_linetype_manual(values = ltypes))
+
+# ---------------- Table Theme -----------------
+tbl_size <- 12  # the brief asks for Arial 12 throughout; reduce only if a wide table cannot fit
+
+themed_table <- function(df, caption = NULL, align = NULL, size = tbl_size) {
+  ft <- flextable(df)
+  ft <- font(ft, fontname = "Arial", part = "all")
+  ft <- fontsize(ft, size = size, part = "all")
+  ft <- bg(ft, bg = map_high, part = "header")
+  ft <- color(ft, color = "white", part = "header")
+  ft <- bold(ft, part = "header")
+  if (nrow(df) >= 2) ft <- bg(ft, i = seq(2, nrow(df), by = 2), bg = map_low, part = "body")
+  ft <- border_remove(ft)
+  ft <- hline(ft, border = officer::fp_border(color = map_na, width = 1), part = "body")
+  ft <- hline_bottom(ft, border = officer::fp_border(color = blue_dark, width = 1.5), part = "body")
+  if (!is.null(align)) {                      # e.g. "llr" = left, left, right
+    al <- c(l = "left", c = "center", r = "right")[strsplit(align, "")[[1]]]
+    for (k in seq_along(al)) ft <- align(ft, j = k, align = unname(al[k]), part = "all")
+  }
+  if (!is.null(caption)) ft <- set_caption(ft, caption = caption)
+  autofit(ft)
+}
+
+
+```
+
+```{r tab-complexity, echo=FALSE}
+cx <- ev$complexity 
+
+themed_table(
+  data.frame(Model = lab(cx$model),
+             Measure    = cx$measure, 
+             Complexity = format(cx$value, big.mark = ",", trim = TRUE)),   caption = "Model Complexity", 
+  align = "llr"
+)
 ```
 
 ### Predictive Performance Results
 
 The accuracy of the models tested in the methodology chapter is measured in 4 ways: deviance, log-likelihood, Gini coefficient, and calibration. Mean Poisson deviance is a uniquely suited measure of predictive accuracy as it punishes near-zero predictions and underestimated small true counts, more than over-predictions of large counts. The mean Poisson log–likelihood estimates the probability of predicting the actual number of events under scrutiny, and then averages the logarithm of this probability over all the data. The exposure weighted Gini index scores the effectiveness of each model at predicting the claim counts, adjusted for the respective exposure levels. Calibration refers to the ratio of predicted to observed claims. A score of 1 implies that the model is unbiased in estimating the number of claims.
 
-```{metrics, echo=TRUE, eval=FALSE}
+```{r, eval=FALSE, echo=TRUE}
 # Metrics
 dev_terms <- function(y, mu) 2*(ifelse(y>0, y*log(y/mu), 0) - (y-mu))
 poisson_deviance <- function(y, mu) mean(dev_terms(y, mu))
@@ -84,41 +186,44 @@ metric_row <- function(model, set, df, mu_vec) {
 }
 ```
 
-Complexity units are counted differently for every model class and are not comparable across them as they refer to different items. Specifically, complexity units for the GLM are coefficients, number of leaves for the boosting machines, and trainable parameters for the neural network. The table below summarises the complexity of the five models.
-
-```{r tab-complexity, echo=FALSE}
-cx <- ev$complexity 
-
-knitr::kable(
-  data.frame(Model = lab(cx$model),
-             Measure    = cx$measure, 
-             Complexity = format(cx$value, big.mark = ",", trim = TRUE)),   align = "llr", row.names = FALSE,   
-  caption = "Model Complexity"
-)
-```
-
 The study ranks the predictive performance of the model classes as GBM, then ANN, then GLM. This trend in the selected model scores in the four measures is summarised in the table below. The sensitivity models are included to test whether the configuration choice outweighs model choice in determining the predictive performance of the respective models. However, they follow the same trend described above, with the GBM sensitivity model scoring 0.2427 and the ANN sensitivity scoring 0.2454 on deviance. This means that the configuration choice does not affect the ranking of the model classes.
 
 ```{r tab-test-performance, echo=FALSE}
 te <- ev$metrics[ev$metrics$set == "test", ]
-knitr::kable(
+themed_table(
   data.frame(Model              = lab(te$model),
              Deviance           = fmt(te$deviance),
              `Log-likelihood`   = fmt(te$loglik),
              `Gini Coefficient` = fmt(te$gini, 4),
              Calibration        = fmt(te$calibration, 4),
              check.names = FALSE),
-  align = "lrrrr", row.names = FALSE,
+  align = "lrrrr", 
   caption = paste("Test-set performance")
 )
 ```
 
-The study compares the models in pairs to validate the consistency of the deviance ranking above on the same test policies. The table below summarises this comparison. For instance, the selected GBM outperforms the GLM by 2.6% given by the 0.0064 difference in deviance on a 95% confidence interval where the two have a deviance of 0.0037 to 0.0108. Similarly, the selected ANN improves on the GLM by 1.1% and the selected GBM improves on the ANN by 1.4%. The ranking is preserved by the sensitivity configurations. However, the differences between the configurations within models is insignificant, meaning that the simplicity rule applied as part of hyperparameter tuning does not affect predictive accuracy on held-out data.
+The study compares the models in pairs to validate the consistency of the deviance ranking above on the same test policies. It uses 3,000 bootstrap resamples of covariate-profile groups in the test dataset. The table below summarises this comparison. For instance, the selected GBM outperforms the GLM by 2.6% given by the 0.0064 difference in deviance on a 95% confidence interval where the two have a deviance of 0.0037 to 0.0108. Similarly, the selected ANN improves on the GLM by 1.1% and the selected GBM improves on the ANN by 1.4%. During tuning, the cross-validated loss shows changes that guide the selection of the optimal hyperparameter configuration. However, the tuning surfaces are flat for both boosting machines and neural networks. Therefore, the choice of configuration does not make a practical difference in the accuracy of the model. Similarly, ranking is preserved by the sensitivity configurations, meaning that the simplicity rule applied does not affect predictive accuracy on held-out data.
+
+```{r}
+# ---- Paired differences in test deviance (forest plot) ------------
+d1 <- ev$diff_table
+d1$comparison <- paste(model_labels[d1$first], "vs", model_labels[d1$second])
+
+# table order, top to bottom
+d1$comparison <- factor(d1$comparison, levels = rev(d1$comparison))
+
+fig1 <- ggplot(d1, aes(x = diff, y = comparison)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_pointrange(aes(xmin = lo, xmax = hi)) +
+  labs(x = "Difference in mean test deviance (negative: first model better)", 
+       y = NULL) + base_theme
+save_fig(fig1, "fig1_paired_differences")
+```
 
 ```{r tab-paired, echo=FALSE}
 pd <- ev$diff_table
 
-knitr::kable(
+themed_table(
   data.frame(Comparison = paste(lab(pd$first), "vs", lab(pd$second)),
              `Difference in deviance (95% CI)` = 
                sprintf("%.4f (%.4f, %.4f)", pd$diff, pd$lo, pd$hi),
@@ -126,7 +231,6 @@ knitr::kable(
                sprintf("%.1f%%", 100 * pd$share_first_better),
              check.names = FALSE),
   align = "lrr",
-  row.names = FALSE,
   caption = paste("Paired differences in mean test deviance (first minus second; negative means the", "first model is better), with 95% group-bootstrap intervals.")
 )
 ```
@@ -138,7 +242,7 @@ m  <- ev$metrics
 tr <- m[m$set == "train", ]
 te <- m[m$set == "test", ]
 te <- te[match(tr$model, te$model), ]
-knitr::kable(
+themed_table(
   data.frame(Model             = lab(tr$model),
              `Train deviance`  = fmt(tr$deviance),
              `Test deviance`   = fmt(te$deviance),
@@ -147,7 +251,7 @@ knitr::kable(
              `Test Gini`       = fmt(te$gini, 3),
              `Gini gap`        = fmt(tr$gini - te$gini, 3),
              check.names = FALSE),
-  align = "lrrrrrr", row.names = FALSE,
+  align = "lrrrrrr", 
   caption = "Training and test performance by model. Gaps are test minus train deviance and train minus test Gini."
 )
 ```
@@ -156,11 +260,12 @@ knitr::kable(
 
 #### Explanation Fidelity Results
 
+The study examines explanation fidelity as a measure of the accuracy of the respective XAI method. The study uses faithfulness correlation, SHAP faithfulness RMSE, and LIME's surrogate $R^2$ to measure explanation fidelity. Fidelity examines how accurate a model's feature attributions are in their description of its behaviour. The faithfulness RMSE quantifies the missed explanation as a root mean squared gap between the XAI' predicted drop in the prediction and the actual drop from running the model being explained. The table below reports the fidelity correlation between the SHAP attribution sums for features and the drops in prediction when the study uses background-value masking. This correlation is averaged over all the policies explained. The table also shows the correlation standard error across policies. Since it is additive on the log scale, removing a set of features from a GLM input set reduces the contribution by the sum of the attributions of the missing features. Therefore, its fidelity correlation is 1 and the RMSE is near-zero (rounded in the table).
 
 ```{r tab-shap-fidelity-summary, echo=FALSE}
 fidelity <- shp$shap_faith_summary
 
-knitr::kable(
+themed_table(
   data.frame(
     Model = lab(fidelity$model),
     `Mean fidelity correlation` = fmt(fidelity$faith_cor, 3),
@@ -169,7 +274,7 @@ knitr::kable(
     check.names = FALSE
   ),
   align = "lrrr",
-  row.names = FALSE,
+  
   caption = paste(
     "SHAP fidelity averaged across explained test policies.",
     "Correlation measures association between SHAP attribution sums and",
@@ -178,7 +283,6 @@ knitr::kable(
   )
 )
 ```
-
 
 ```{r tab-shap-fidelity-by-risk-decile, echo=FALSE}
 decile_matrix <- shp$shap_faith_decile
@@ -204,10 +308,10 @@ fidelity_decile[model_columns] <- lapply(
 names(fidelity_decile)[match(model_columns, names(fidelity_decile))] <-
   lab(model_columns)
 
-knitr::kable(
+themed_table(
   fidelity_decile,
   align = c("r", rep("r", length(model_columns))),
-  row.names = FALSE,
+  
   caption = paste(
     "Mean SHAP fidelity correlation by predicted-risk decile.",
     "Deciles are defined using GBM-selected predicted risk."
@@ -218,7 +322,7 @@ knitr::kable(
 ```{r tab-rq1-performance-and-fidelity, echo=FALSE}
 rq1 <- lm_$rq1
 
-knitr::kable(
+themed_table(
   data.frame(
     Model = lab(rq1$model),
     `Complexity measure` = rq1$measure,
@@ -234,7 +338,7 @@ knitr::kable(
     check.names = FALSE
   ),
   align = "llrrrrrrr",
-  row.names = FALSE,
+  
   caption = paste(
     "Test performance, model complexity, and explanation fidelity.",
     "LIME results use prespecified bins."
@@ -242,13 +346,12 @@ knitr::kable(
 )
 ```
 
-
 #### Explanation Stability Results
 
 ```{r tab-lime-bin-specification, echo=FALSE}
 bins <- lm_$bin_table
 
-knitr::kable(
+themed_table(
   data.frame(
     Feature = bins$feature,
     Bin = bins$bin,
@@ -258,11 +361,10 @@ knitr::kable(
     check.names = FALSE
   ),
   align = "llrrr",
-  row.names = FALSE,
+  
   caption = "Prespecified LIME bins, training-data shares, and representative values."
 )
 ```
-
 
 ```{r tab-lime-metrics, echo=FALSE}
 lime <- lm_$lime_summary
@@ -272,7 +374,7 @@ scheme_labels <- c(
   no_bins = "No binning"
 )
 
-knitr::kable(
+themed_table(
   data.frame(
     Scheme = unname(scheme_labels[as.character(lime$scheme)]),
     Model = lab(lime$model),
@@ -288,7 +390,7 @@ knitr::kable(
     check.names = FALSE
   ),
   align = "llrrrrrrr",
-  row.names = FALSE,
+  
   caption = paste(
     "LIME surrogate fit, faithfulness, and stability by binning scheme and model.",
     "Higher values indicate greater agreement or stability, except relative attribution SD,",
@@ -296,7 +398,6 @@ knitr::kable(
   )
 )
 ```
-
 
 ```{r tab-lime-local-rank-by-scheme, echo=FALSE}
 rank_mat <- with(
@@ -312,15 +413,13 @@ rank_table <- data.frame(
 )
 names(rank_table)[-1] <- lab(colnames(rank_mat))
 
-knitr::kable(
+themed_table(
   rank_table,
   align = c("l", rep("r", ncol(rank_table) - 1)),
-  row.names = FALSE,
+  
   caption = "Mean local feature-rank correlation across repeated LIME explanations."
 )
 ```
-
-
 
 ```{r tab-lime-surrogate-r2-by-scheme, echo=FALSE}
 r2_mat <- with(
@@ -336,10 +435,10 @@ r2_table <- data.frame(
 )
 names(r2_table)[-1] <- lab(colnames(r2_mat))
 
-knitr::kable(
+themed_table(
   r2_table,
   align = c("l", rep("r", ncol(r2_table) - 1)),
-  row.names = FALSE,
+  
   caption = "Mean LIME surrogate R-squared by binning scheme and model."
 )
 ```
@@ -347,7 +446,7 @@ knitr::kable(
 ```{r tab-shap-stability-under-refits, echo=FALSE}
 stability <- lm_$rq3
 
-knitr::kable(
+themed_table(
   data.frame(
     Model = lab(stability$model),
     Refits = stability$R,
@@ -363,13 +462,10 @@ knitr::kable(
     check.names = FALSE
   ),
   align = "lr",
-  row.names = FALSE,
+  
   caption = "SHAP stability metrics for models refitted on grouped bootstrap samples."
 )
 ```
-
-
-
 
 `stability_metrics` defines a number of stability metrics that capture different aspects of the change in SHAP explanations.
 
