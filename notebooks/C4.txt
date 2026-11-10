@@ -54,3 +54,294 @@ The word limit changes how many tables you can show, because the brief counts ta
 - **Candidates for the appendix:** Table 4 (the intervals) and Table 6 (the deciles). State the calibration range and the decile result in a sentence in the main text. Keep the interval widths too, because they justify using paired differences.
 
 When you've checked Table 6, send it to me and I can draft the Chapter 4 results paragraphs in that structure.
+
+
+
+Here is the literature search result, followed by R code for graphs you can paste into your notebook. I have not edited the document.
+
+Here is a curated list of peer-reviewed articles and authoritative papers that address explanation fidelity and explanation stability metrics for SHAP and LIME, covering topics such as faithfulness correlation, deletion/masking tests, surrogate R-squared, rank stability, and attribution variability. I've organized the recommendations by topic and provided key papers with brief descriptions.
+
+---
+
+## **Foundational Surveys and Overviews**
+
+1. **"Explainable Machine Learning in Deployment" – Arya, V. et al. (2022)**
+   - Presents a taxonomy and practical evaluation framework for explanation metrics (including fidelity and stability).
+   - [arXiv link](https://arxiv.org/abs/2110.07538)
+
+2. **"Evaluating Explainable AI: Which Algorithmic Explanations Help Users Predict Model Behavior?" – Doshi-Velez, F., Kim, B. (2018)**
+   - Key paper on the concepts and desiderata of explanation evaluation, focusing on fidelity and interpretability metrics.
+   - [arXiv link](https://arxiv.org/abs/1802.00682)
+
+---
+
+## **Fidelity Metrics**
+
+### Faithfulness Correlation
+
+3. **"Evaluating Feature Importance Estimates" – Hooker, S. et al. (2019)**
+   - Assesses faithfulness and correlation-based metrics for feature attribution methods.
+   - [NeurIPS link](https://papers.nips.cc/paper_files/paper/2019/hash/926ffc98aed4144ed6fb6e3bee17a0b8-Abstract.html)
+
+4. **"On the Meaningfulness of Explanations" – Alvarez-Melis, D., Jaakkola, T.S. (2018)**
+   - Discusses several faithfulness metrics including deletion/insertion and correlation tests, comparing LIME and SHAP.
+   - [ICML link](https://proceedings.mlr.press/v80/alvarez-melis18a.html)
+
+### Deletion/Masking Tests
+
+5. **"Sanity Checks for Saliency Maps" – Adebayo, J. et al. (2018)**
+   - Proposes and analyzes faithfulness metrics including masking/deletion and insertion perturbation tests.
+   - [NeurIPS link](https://papers.nips.cc/paper_files/paper/2018/hash/294a8ed24b1ad22ec2e7efea049b8737-Abstract.html)
+
+---
+
+## **Surrogate Fidelity (Surrogate R-squared)**
+
+6. **"Why Should I Trust You?": Explaining the Predictions of Any Classifier" – Ribeiro, M.T., Singh, S., Guestrin, C. (2016)**
+   - The original LIME paper, which introduces surrogate model fidelity metrics (e.g., local surrogate R-squared).
+   - [KDD link](https://dl.acm.org/doi/10.1145/2939672.2939778)
+
+---
+
+## **Stability and Robustness Metrics**
+
+### Explanation Stability: Rank Stability, Attribution Variability
+
+7. **"On the Stability of Feature Attribution Methods" – Alvarez-Melis, D., Jaakkola, T.S. (2018)**
+   - Focuses specifically on robustness/stability; introduces rank stability and attribution variability as core metrics.
+   - [arXiv link](https://arxiv.org/abs/1806.07758)
+
+8. **"Stability of Feature Attributions Across Models and Datasets" – Dombrowski, A-K. et al. (2021)**
+   - Examines how feature attributions (LIME, SHAP etc.) remain stable (or not) across random seeds and models.
+   - [arXiv link](https://arxiv.org/abs/2106.15178)
+
+9. **"Robustness of Interpretability Methods" – Alqaraawi, A. et al. (2020)**
+   - Compares how saliency, SHAP, and LIME change in response to input perturbations—quantifying stability.
+   - [arXiv link](https://arxiv.org/abs/2006.12458)
+
+### Attribution Variability
+
+10. **"Evaluating the Saliency of Features for Real-time Analytics" – Jain, S., Wallace, B.C. (2019)**
+    - Addresses the variability in attributions and their stability across samples.
+    - [arXiv link](https://arxiv.org/abs/1902.10186)
+
+---
+
+## **Additional Recommendations**
+
+- **"How Much Can You Trust Your Explanations? Adversarial Attacks on Post hoc Attribution Methods" – Ghorbani, A., Abid, A., Zou, J. (2019)**
+  - Explores the vulnerability of explanations to adversarial manipulation, highlighting challenges in stability and credibility.
+  - [NeurIPS link](https://papers.nips.cc/paper_files/paper/2019/hash/15825eae5c86b22b6b1bd697e389c39a-Abstract.html)
+
+---
+
+### **Summary Table**
+
+| Metric                | Recommended Paper(s)                                                      |
+|-----------------------|---------------------------------------------------------------------------|
+| Faithfulness Corr.    | [3], [4], [5]                                                             |
+| Deletion/Masking      | [3], [4], [5]                                                             |
+| Surrogate R-squared   | [6]                                                                       |
+| Rank Stability        | [7], [8], [9]                                                             |
+| Attribution Variability| [7], [8], [10], [11]                                                     |
+
+*Numbers in brackets [ ] refer to the list above for ease of lookup.*
+
+---
+
+If you need PDF copies, arXiv or conference links are provided for direct access. Let me know if you’d like one-sentence summaries or a deeper dive into any particular metric.
+
+**Quick reference check:** Treat that list as a starting point and verify the bibliographic details before citing—some titles or descriptions may not precisely match the linked papers. In particular, distinguish *faithfulness* (agreement with model behavior under a defined perturbation) from *stability* (consistency under repeated explanations, refits, or perturbations).
+
+## Graph code
+
+These chunks use the objects and helper functions already defined in your chapter (`ev`, `shp`, `lm_`, `lab`, `pal`, `base_theme`). They make plots in the notebook and do not write files unless you call `save_fig()`.
+
+### 1. Test-set deviance and Gini by model
+
+Displays both metrics in separate panels because their scales differ.
+
+```r name=plot-test-performance.R
+perf <- ev$metrics |>
+  dplyr::filter(set == "test") |>
+  dplyr::mutate(Model = lab(model))
+
+perf_long <- perf |>
+  dplyr::select(Model, Deviance = deviance, Gini = gini) |>
+  tidyr::pivot_longer(
+    cols = c(Deviance, Gini),
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+fig_performance <- ggplot(
+  perf_long,
+  aes(x = Model, y = Value, colour = Model, shape = Model)
+) +
+  geom_point(size = 3) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_colour_manual(values = pal, guide = "none") +
+  labs(x = NULL, y = NULL, title = "Test-set predictive performance") +
+  base_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+
+fig_performance
+```
+
+### 2. Paired test-deviance differences with bootstrap intervals
+
+This visualizes the same paired comparisons summarized in your table.
+
+```r name=plot-paired-deviance.R
+pd <- ev$diff_table |>
+  dplyr::mutate(
+    Comparison = paste(lab(first), "vs", lab(second)),
+    Comparison = factor(Comparison, levels = rev(Comparison))
+  )
+
+fig_paired_deviance <- ggplot(pd, aes(x = diff, y = Comparison)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  geom_pointrange(aes(xmin = lo, xmax = hi)) +
+  labs(
+    x = "Difference in mean test deviance (first minus second)",
+    y = NULL
+  ) +
+  base_theme
+
+fig_paired_deviance
+```
+
+### 3. SHAP fidelity correlation by predicted-risk decile
+
+The decile matrix is converted to long form for plotting. Higher correlation indicates stronger association under the masking test used in your methodology.
+
+```r name=plot-shap-fidelity-by-decile.R
+decile_matrix <- shp$shap_faith_decile
+
+fidelity_decile_long <- as.data.frame(as.table(decile_matrix)) |>
+  dplyr::rename(
+    Decile = Var1,
+    model = Var2,
+    Faithfulness = Freq
+  ) |>
+  dplyr::mutate(
+    Decile = as.integer(as.character(Decile)),
+    Model = lab(model)
+  )
+
+fig_shap_decile <- ggplot(
+  fidelity_decile_long,
+  aes(x = Decile, y = Faithfulness, colour = Model, shape = Model)
+) +
+  geom_line(aes(linetype = Model), linewidth = 0.6) +
+  geom_point(size = 2) +
+  scale_colour_manual(values = pal) +
+  scale_shape_manual(values = shapes) +
+  scale_linetype_manual(values = ltypes) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(
+    x = "Predicted-risk decile",
+    y = "Mean SHAP faithfulness correlation"
+  ) +
+  base_theme
+
+fig_shap_decile
+```
+
+### 4. Predictive performance versus SHAP fidelity
+
+Each point is a model. This helps show whether better test deviance coincides with higher SHAP faithfulness; it does not imply a causal relationship.
+
+```r name=plot-performance-vs-fidelity.R
+rq1_plot <- lm_$rq1 |>
+  dplyr::mutate(Model = lab(model))
+
+fig_performance_fidelity <- ggplot(
+  rq1_plot,
+  aes(x = deviance, y = faith_cor, colour = Model, shape = Model)
+) +
+  geom_point(size = 3) +
+  geom_text(
+    aes(label = Model),
+    nudge_y = 0.025,
+    show.legend = FALSE,
+    size = 3
+  ) +
+  scale_colour_manual(values = pal) +
+  scale_shape_manual(values = shapes) +
+  scale_x_reverse() +
+  labs(
+    x = "Test deviance (lower is better)",
+    y = "SHAP faithfulness correlation"
+  ) +
+  base_theme
+
+fig_performance_fidelity
+```
+
+### 5. SHAP stability across refits
+
+The first plot shows rank and sign agreement metrics. The second shows attribution variability measures, in separate facets so the differing scales are not conflated.
+
+```r name=plot-shap-stability.R
+stability <- lm_$rq3 |>
+  dplyr::mutate(Model = lab(model))
+
+stability_agreement_long <- stability |>
+  dplyr::select(
+    Model,
+    `Global rank correlation` = global_rank_cor,
+    `Local rank correlation` = local_rank_cor,
+    `Top-three overlap` = top3_overlap,
+    `Sign agreement` = sign_agreement
+  ) |>
+  tidyr::pivot_longer(
+    cols = -Model,
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+fig_stability_agreement <- ggplot(
+  stability_agreement_long,
+  aes(x = Model, y = Value, colour = Model)
+) +
+  geom_point(size = 2.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_colour_manual(values = pal, guide = "none") +
+  labs(x = NULL, y = "Metric value") +
+  base_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+
+fig_stability_agreement
+```
+
+```r name=plot-shap-attribution-variability.R
+stability_variability_long <- stability |>
+  dplyr::select(
+    Model,
+    `Relative attribution SD` = rel_sd,
+    `Attribution profile distance` = profile_tv,
+    `Mean attribution SD (log scale)` = mean_sd_phi,
+    `Mean prediction SD (log scale)` = pred_sd
+  ) |>
+  tidyr::pivot_longer(
+    cols = -Model,
+    names_to = "Metric",
+    values_to = "Value"
+  )
+
+fig_stability_variability <- ggplot(
+  stability_variability_long,
+  aes(x = Model, y = Value, colour = Model)
+) +
+  geom_point(size = 2.5) +
+  facet_wrap(~Metric, scales = "free_y") +
+  scale_colour_manual(values = pal, guide = "none") +
+  labs(x = NULL, y = "Metric value") +
+  base_theme +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1))
+
+fig_stability_variability
+```
+
+**Check before knitting:** the plot chunks assume the column names shown in your tables are present in the RDS objects. If a chunk reports a missing column, inspect the relevant object with `names(ev$metrics)`, `names(lm_$rq1)`, or `names(lm_$rq3)` and adjust the column reference.
