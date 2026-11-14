@@ -1,0 +1,8 @@
+Chapter 5
+
+
+Limitations
+
+Although the study designed this methodology to lend the conclusions as much validity as would be expected for its utility, there are some loopholes that are critical to note as the context for its conclusions or for a future study seeking to validate the findings and conclusions herein. First, the marginal value function evaluates unrealistic feature combinations when the variables represented are dependent. Slack et al. discuss this drawback in better detail and demonstrate how perturbation-based explanations are susceptible when explaining such features as area and density, or bonus-malus and age in freMTPL2freq. The study also works with small, and arguably insufficient samples such as 300 policies for explanations, 100 for SHAP stability, and 30 refits. While these samples are consistently applied, the study's conclusions may be hindered by the small sample. Given more liberal constraints of computing capabilities, the study would earn more validity supported by the law of large numbers. Another limitation is the small set of points available to exhaustively answer the first research question regarding co-variation, rather than a simple trend. Having only five model points to assess, the study cannot make a definitive inference regarding the co-variation of predictive accuracy and explainability. While fixed hyperparameters enable a better assessment of explanation stability, they conceal the data sensitivity of tuning from the analysis altogether. The limited dimensionality of the data and the use of a single split also limits how much the conclusions made in the study can be generalized.
+
+

@@ -462,15 +462,8 @@ Having established the shape and distribution of claim occurrences in the datase
 
 ### Generalized Linear Model
 
-The study specifies a Poisson GLM with a log link function.
+The study specifies a Poisson GLM with a log link function, which is the canonical link function for the Poisson distribution.
 Ohlsson and Johansson, (2010) posit that this type of GLMs ensures positive claim predictions and prevents the underpricing of risks as a result of the asymmetry of insurance data.
-The log link function is the canonical link function of the Poisson distribution, meaning that it maps perfectly to the Poisson distribution's natural parameter, ensuring that it is easy to determine the standard errors or confidence intervals.
-Besides binning the age variables, `Density` and `BonusMalus` are log-transformed to linearise their multiplicative interaction with insurance risk.
-This makes them easier to fit with a GLM, and reduces the effect of outliers.
-
-The choices on how to preprocess these features and leave other features as they were recalls the argument of false leverage.
-While the GLM is backed by a sound mathematical foundation, the choices discussed here are made quite arbitrarily and there is literature backing alternative approaches.
-As such, these choices carry the illusion of arbitrariness discussed in chapter 2.
 
 ```{r GLM-setup, eval = FALSE, include = FALSE, echo = FALSE}
 glm_formula <- ClaimNb ~ offset(log(Exposure)) + VehPower + DrivAgeBin + VehAgeBin +
@@ -833,7 +826,7 @@ The categorical variables in the insurance data are converted into 0-based integ
 The training begins with an intercept-only model, then follows the loss function to pursue more accurate predictions.
 
 The grid used in the ANN has four architectures with one to three hidden layers and two L2 penalties.
-Besides this, the tuning and selection follows the logic created for the GBM.
+Like the GBM, the selected ANN configuration is the simplest one within 1 SD of the most accurate network.
 The training run uses the median number of epochs in the cross-validation.
 The predictions are taken as the average of five networks trained from different random seeds, to reduce the run-to-run variability in the training.
 
@@ -1096,12 +1089,13 @@ cat(sprintf("\nTrain calibration (selected ANN ensemble): %.4f\n",
 
 ## Evaluation Framework
 
-This section evaluates the GLM and two configurations of each tuned model class (GBM and ANN) on the test dataset.
-These configurations include the selected configuration and the sensitivity configuration.
-The sensitivity configurations show the best cross validated loss in each model class, regardless of its complexity.
-In this context, this simplicity or complexity is characterised by the number of coefficients for the GLM, total leaves for the GBM, and trainable parameters for the neural network.
-This enables the consideration of whether the conclusions drawn from these models depend on the simplicity rule.
-The evaluation and selection criteria is provided in further detail in the appendices and the repository.
+This section evaluates the accuracy of the GLM and the two configurations of each tuned model class (GBM and ANN) discussed above on the test dataset.
+in the methodology chapter is measured in 4 ways: deviance, log-likelihood, Gini coefficient, and calibration.
+Mean Poisson deviance is a uniquely suited measure of predictive accuracy as it punishes near-zero predictions and underestimated small true counts, more than over-predictions of large counts.
+The mean Poisson log–likelihood estimates the probability of predicting the actual number of events under scrutiny, and then averages the logarithm of this probability over all the data.
+The exposure weighted Gini index scores the effectiveness of each model at predicting the claim counts, adjusted for the respective exposure levels.
+Calibration refers to the ratio of predicted to observed claims.
+A score of 1 implies that the model is unbiased in estimating the number of claims.
 
 ```{r evaluation-framework, eval = FALSE, include = FALSE, echo = FALSE}
 # --- Test Evaluation ---
@@ -1339,21 +1333,16 @@ saveRDS(list(metrics = metrics, complexity = complexity, deciles = deciles,
 
 ## Explainability
 
-This section directly addresses research questions 1 and 3 in four R scripts that carry out further analysis on the freMTPL2freq dataset from CASdatasets.
-The scripts are described individually to provide a clear explanation of the approach they each take and the desired result.
+This section directly addresses research questions 1 and 3 through the analysis described below.
 
 ### Explainability Setup
 
-In the first script below, the study sets up the environment for the entire section.
-It provides a switch `PILOT <- TRUE` between a pilot run and a full run which provides the metrics that the study reports.
-It then defines one prediction wrapper for each of the models scored in the performance section using `make_glm_fn`, `make_gbm_fn`, and `make_ann_fn` which take the data frame of the nine input variables and return the *log of expected annual frequency at unit exposure*.
+The study sets up the environment for the entire section, starting with a switch `PILOT <- TRUE` between a pilot run and a full run which provides the metrics that the study reports.
+It defines one prediction wrapper for each of the models scored in the performance section using `make_glm_fn`, `make_gbm_fn`, and `make_ann_fn` which take the data frame of the nine input variables and return the *log of expected annual frequency at unit exposure*.
 The integrity check validates that the wrappers reproduce the predictions from the evaluation section.
-
-After this, the script generates the stratified sample for explanation.
-`shap_exact` determines the exact SHAP values.
+`shap_exact` determines the exact SHAP values in a stratified sample.
 It lets the features inside the coalition take the values from the policy, and the rest take values from the background rows, and averages the prediction over the background to provide $2^9$ values.
-These values are combined with the Shapley weights to produce the exact SHAP values.
-This approach provides the same quantity that is computed by KernelSHAP by sampling, while removing coalition-sampling error.
+These values are combined with the Shapley weights to produce the same quantity that is computed by KernelSHAP by sampling, while removing coalition-sampling error.
 
 ```{r explainability-setup, eval = FALSE, include = TRUE, echo = FALSE}
 # Test the code quickly with a smaller sample for lower compute, then revert
@@ -1532,9 +1521,9 @@ cat(sprintf("Design ready: %d explained policies (%d for stability,
 
 ### SHAP Fidelity
 
-For every policy, the efficiency check validates the expectation that SHAP values add up to the difference between the prediction and the baseline.
-The script also reviews the GLM consistency given by the absolute difference between SHAP values and centered model-term contributions.
-Expected to be near zero, it agrees to 4.19e-15.
+The study checks the efficiency of the SHAP fidelity measure by validating that SHAP attributions are equal to the predictions and the baseline.
+The difference gives the efficiency error.
+It also reviews the GLM consistency given by the absolute difference between SHAP values and centered model-term contributions.
 The script compares the drop in policy predictions over the masked rows with the sum of SHAP values for the replaced features.
 It records the correlation between the attribution sums and the observed prediction drops over all the sampled subsets.
 A high correlation implies that the attribution sums closely track the respective model's changes.
@@ -1670,19 +1659,17 @@ saveRDS(list(shap_main = shap_main, shap_faith = shap_faith,
 This script elaborates the changes in SHAP explanations, studying how much they move, and what drives their changes.
 It considers three sources:
 
-- **Explainer noise:** This is instability that arises from the explainer itself, measured here by fitting the same model with different background samples.
+- **Explainer noise:** Measured here by refitting the same model with different background samples.
 
-- **Data sensitivity:** This is caused by the model's dependence on its training data.
-  It is measured in `fit_glm_b`, `fit_gbm_b`, and `fit_ann_b` by refitting the GLM, GBM (selected), and ANN(selected) on grouped bootstrap resamples of the training data with locked hyperparameters.
+- **Data sensitivity:** Measured in `fit_glm_b`, `fit_gbm_b`, and `fit_ann_b` by refitting the models on grouped bootstrap resamples of the training data with locked hyperparameters.
 
 - **Prediction instability:** This refers to the attribution changes that arise from the prediction itself changing.
   It is calculated below as the standard deviation of each policy's log-prediction across refits.
 
-SHAP attributions must sum to $predictions - baseline$.
 When predictions change, so must the attributions.
 However, upon refitting, similar predictions are credited to different drivers.
 Therefore, model risk is assessed by whether the refit instability exceeds the explainer noise per attribution, and whether the reallocation measure is non-zero and differs across model classes.
-The idea of *'measurable'* model risk rests on these descriptive ratios.
+The study measures instability through `stability_metrics()`.
 
 ```{r explainability-shap-stability, eval = FALSE, include = TRUE, echo = FALSE}
 # ---- SHAP Stability - RQ3 ----
@@ -1858,14 +1845,12 @@ saveRDS(list(stab_axis1 = stab_axis1, stab_axis2 = stab_axis2,
         paste0("explain_shap_stability", RUN_TAG, ".rds"))
 ```
 
-### LIME and Summary tables
+### LIME
 
-This script adds the second explanation method in the methodology, LIME.
-This provides a validation of the trends observed with SHAP so that the conclusions reached by the study do not solely rely on one explanation method.
+LIME provides a validation of the trends observed with SHAP so that the conclusions reached by the study do not solely rely on one explanation method.
 By default, LIME discretises continuous variables, which may significantly impact explanation stability.
 The study creates a primary approach to binning which entails defining cut-points once per variable in addition to the age bins defined for training the GLM, and then applying them to the models uniformly.
-This approach enables uniformity across model classes, ease of verification for LIME against GLM coefficients, and the actuarial explanations for changes across stable and policy-relevant risk bands.
-However, the study implements sensitivity checks through continuous perturbation (`no_bins`) and the default LIME approach (`default_lime_bins`).
+It also creates sensitivity checks through continuous perturbation (`no_bins`) and the default LIME approach (`default_lime_bins`).
 Having these checks shows whether explanation instability hinges on a binning choice.
 This script measures LIME's surrogate, $R^2$, and a similar removal-based faithfulness measure as the one used for SHAP.
 These measures provide a fair assessment of fidelity from a LIME standpoint and summarises LIME explanations of the same policies with (`stability_metrics`).
@@ -2141,4 +2126,201 @@ saveRDS(list(seed_phi = seed_phi,
              ensemble_equiv_sd = sqrt(v_refit - v_seed + v_seed / 5), 
              two_level = if (exists("two_level")) two_level, 
              saved_at = Sys.time()), "explain_ann_decomposition.rds")
+```
+
+## Decision Framework
+
+The quantitative comparative study synthesizes a decision framework matrix from the assessment of the trade off between predictive performance and explainability to aid in model selection for insurance pricing.
+The study identifies the following pillars for determining the appropriate model for pricing, along with the respective criteria that guide the decision.
+
+- **Predictive accuracy:** Test deviance and Gini
+
+- **Explainability:** SHAP faithfulness correlation
+
+- **Robustness:** Premium-equivalent refit standard deviation, sign agreement, and calibration ratio.
+
+The decision framework for model selection is an additive tool that enables model selection.
+It is designed to score each measure as a criterion from 0 to 1 using linear interpolation.
+It clamps a worst and a best anchor at both ends of the 0-1 scale.
+The anchor is set depending on the characteristics of each criterion as follows:
+
+| Criterion | Worst Anchor | Best Anchor | Reason |
+|------------------|------------------|------------------|------------------|
+| Deviance | Test deviance of the intercept-only model | Best deviance from all scored models | Creates a range from no model to the best model |
+| Gini | 0 | Highest Gini from all scored models | *as above* |
+| Refit SD | 5% | 0% | 0 means no variation, a deviation of 5% in a single feature is massive |
+| Sign agreement | 0.5 | 1 | Sign agreement does not fall below 0.5 or exceed 1 (random to perfect agreement) |
+| Profile distance | 0.25 | 0 | Based on judgement, |
+| Fidelity RMSE | 0.1 | 0 | 0.1 log units is an error of about 10% and 0 means a perfectly additive model |
+
+The different criteria are aggregated to contribute to the pillar's collective weight in the framework.
+For performance, mean Poisson deviance is assigned a higher score than Gini as the study's primary performance measure.
+The criteria that make up the robustness pillar are equally aggregated to even out the different aspects of attribution variability.
+The study considers different scenarios that may be shaped by actuarial priorities or regulatory standards.
+These scenarios require varying weights for of the three pillars to add up to 100.
+The weights are multiplied by the score of each pillar's constituent criteria to provide the total points.
+The study makes this assessment for the GLM and selected configurations of the GBM and ANN as a demonstration of how this multi-criteria framework aids model selection.
+The output from the framework is a choice from the models being reviewed, which is subjective based on specified weights, criteria, and anchors.
+
+```{r decision-framework-rubric, eval=FALSE, echo=FALSE}
+# -------------------------- 1. The rubric ----------------------------
+ev   <- readRDS("final_evaluation_results.rds")
+shp  <- readRDS("explain_shap_main.rds")
+stab <- readRDS("explain_shap_stability.rds")
+
+te <- ev$metrics[ev$metrics$set == "test", c("model", "deviance", 
+                                             "gini", "calibration")]
+fi <- shp$shap_faith_summary[, c("model", "faith_cor", "faith_rmse")]
+st <- stab$stab_axis2[, c("model", "premium_equiv", 
+                          "sign_agreement", "profile_tv")]
+
+evidence_matrix <- Reduce(function(a, b) merge(a, b, by = "model", all.x = TRUE), 
+                          list(te, fi, st))
+evidence_matrix <- evidence_matrix[match(names(model_labels), 
+                                         evidence_matrix$model), ]
+f  <- function(x, d) ifelse(is.na(x), "–", formatC(x, format = "f", digits = d))
+
+themed_table(
+  data.frame(Model                       = as.character(lab(evidence_matrix$model)),
+             `Deviance ▿`                = f(evidence_matrix$deviance, 4),
+             `Gini ▵`                    = f(evidence_matrix$gini, 3),
+             `SHAP fidelity ▿`           = f(evidence_matrix$faith_rmse, 4),
+             `Refit SD, premium % ▿`     = f(100 * evidence_matrix$premium_equiv, 1),
+             `Sign agreement ▵`          = f(evidence_matrix$sign_agreement, 3),
+             `Profile distance ▿`        = f(evidence_matrix$profile_tv, 3),
+             check.names = FALSE),
+  caption = paste("Evidence Matrix: Test-Set Performance, SHAP Fidelity, and Refit Stability"),
+  align = "lrrrrrr")
+
+
+criteria <- data.frame(
+  criterion       = c("Deviance", "Gini", 
+                      "Refit SD (premium %)", "Sign agreement",
+                      "Profile distance", "Fidelity RMSE (log units)"),
+  
+  column          = c("deviance", "gini", 
+                      "refit_sd_pct", "sign_agreement",
+                      "profile_tv", "faith_rmse"),
+  
+  pillar          = c("Performance", "Performance", 
+                      "Robustness", "Robustness",
+                      "Robustness", "Explainability"),
+  # deviance is the primary scoring rule
+  share_in_pillar = c(0.60, 0.40, 1/3, 1/3, 1/3, 1),
+  # sign agreement cannot fall below 0.5 
+  worst           = c(0.2550, 0.200, 5.0, 0.5, 0.25, 0.10),   
+  best            = c(0.2400, 0.350, 0.0, 1.0, 0.00, 0.00),
+  stringsAsFactors = FALSE
+)
+stopifnot(all(abs(tapply(criteria$share_in_pillar, 
+                         criteria$pillar, sum) - 1) < 1e-9))
+
+# ------------------------- 2. Candidate models -----------------------------
+models_with_stability <- evidence_matrix[!is.na(evidence_matrix$premium_equiv), ]
+models_with_stability$refit_sd_pct <- 100 * models_with_stability$premium_equiv
+model_names <- as.character(lab(models_with_stability$model))
+
+score_criterion <- function(value, worst, best) {
+  pmin(pmax((value - worst) / (best - worst), 0), 1)
+}
+criterion_scores <- sapply(seq_len(nrow(criteria)), function(i)
+  score_criterion(models_with_stability[[criteria$column[i]]], 
+                  criteria$worst[i], criteria$best[i]))
+colnames(criterion_scores) <- criteria$criterion
+rownames(criterion_scores) <- models_with_stability$model
+
+pillars <- unique(criteria$pillar)
+
+# each pillar on a 0-1 scale
+pillar_scores_01 <- sapply(pillars, function(p) {
+  k <- criteria$pillar == p
+  as.numeric(criterion_scores[, k, drop = FALSE] %*% criteria$share_in_pillar[k])
+})
+rownames(pillar_scores_01) <- rownames(criterion_scores)
+
+# ------------------- 3. Points for a set of pillar weights -------------------
+compute_points <- function(pillar_weights) {
+  stopifnot(setequal(names(pillar_weights), pillars), 
+            abs(sum(pillar_weights) - 100) < 1e-9)
+  criterion_weights <- unname(pillar_weights[criteria$pillar]) * criteria$share_in_pillar
+  by_criterion <- sweep(criterion_scores, 2, criterion_weights, "*")
+  by_pillar <- sapply(pillars, function(p) rowSums(by_criterion[, criteria$pillar == p, 
+                                                                drop = FALSE]))
+  list(pillar_weights = pillar_weights, criterion_weights = criterion_weights,
+       by_criterion = by_criterion, by_pillar = by_pillar, total = rowSums(by_criterion))
+}
+
+fmt_points <- function(x) formatC(x, format = "f", digits = 1)
+
+# ----------------------- 4. Tables for one scenario -------------------------
+# tie_tolerance_points: models within this many points of the leader are reported as not separable.
+
+build_scenario_tables <- function(weight_performance, weight_robustness, 
+                                  weight_explainability,
+                                  scenario_name, tie_tolerance_points = 2) {
+  points <- compute_points(c(Performance = weight_performance, 
+                             Robustness = weight_robustness,
+                             Explainability = weight_explainability))
+  display_order  <- order(-points$total)
+  rank_by_points <- rank(-points$total, ties.method = "min")
+  within_tolerance <- points$total >= max(points$total) - tie_tolerance_points
+
+  pillar_table_data <- data.frame(Model = model_names[display_order], check.names = FALSE)
+  for (p in pillars) {
+    pillar_table_data[[sprintf("%s (%g)", p, points$pillar_weights[[p]])]] <-
+      fmt_points(points$by_pillar[display_order, p])
+  }
+  pillar_table_data[["Total (100)"]] <- fmt_points(points$total[display_order])
+  pillar_table_data[["Rank"]] <- rank_by_points[display_order]
+  pillar_table_data[["Within tolerance of top"]] <- ifelse(within_tolerance[display_order], 
+                                                           "Yes", "No")
+
+  criterion_table_data <- data.frame(Model = model_names[display_order], check.names = FALSE)
+  for (j in seq_len(nrow(criteria))) {
+    criterion_table_data[[sprintf("%s (%s)", 
+                                  criteria$criterion[j], 
+                                  fmt_points(points$criterion_weights[j]))]] <-
+      fmt_points(points$by_criterion[display_order, j])
+  }
+  criterion_table_data[["Total (100)"]] <- fmt_points(points$total[display_order])
+
+  list(
+    pillars  = themed_table(pillar_table_data,
+                            caption = paste0(scenario_name, 
+                                             ": pillar summary (points out of 100)"),
+                            align = paste0("l", strrep("r", 
+                                                       ncol(pillar_table_data) - 1))),
+    criteria = themed_table(criterion_table_data,
+                            caption = paste0(scenario_name, 
+                                             ": points by criterion (maximum in brackets)"),
+                            align = paste0("l", strrep("r", 
+                                                       ncol(criterion_table_data) - 1))),
+    points   = points
+  )
+}
+
+# --------- 5. Checks on what the weights actually do -----------------
+# Spread of points across models for each pillar: a pillar whose models score alike cannot change the
+# ranking, whatever its nominal weight.
+effective_weights <- function(points) {
+  spread <- apply(points$by_pillar, 2, function(x) max(x) - min(x))
+  data.frame(Pillar = names(spread),
+             `Nominal weight` = points$pillar_weights[names(spread)],
+             `Spread of points across models` = fmt_points(spread),
+             `Effective share (%)` = fmt_points(100 * spread / sum(spread)),
+             check.names = FALSE, row.names = NULL)
+}
+
+# Share of random pillar weightings (uniform over all weights summing to 100) in which each model ranks first
+share_ranked_first <- function(n_draws = 10000, seed = 2034) {
+  set.seed(seed)
+  w <- matrix(rexp(n_draws * length(pillars)), ncol = length(pillars))
+  w <- 100 * w / rowSums(w)
+  totals  <- pillar_scores_01 %*% t(w)  # models x draws
+  winners <- factor(rownames(pillar_scores_01)[apply(totals, 2, which.max)],
+                    levels = rownames(pillar_scores_01))
+  data.frame(Model = model_names,
+             `Share of weightings ranked first (%)` = fmt_points(100 * as.numeric(table(winners)) / n_draws),
+             check.names = FALSE)
+}
 ```

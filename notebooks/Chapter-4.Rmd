@@ -1,11 +1,8 @@
 ---
-title: "Findings Compilation"
-author: "Moffat Kagiri Ngugi"
-date: "`r Sys.Date()`"
 output: word_document
 ---
 
-```{r setup, include = FALSE, echo = FALSE}
+```{r setup, include = FALSE, echo = FALSE, message=FALSE, warning=FALSE}
 knitr::opts_chunk$set(
   dpi = 600,
   out.width = "100%",
@@ -29,13 +26,7 @@ require(plotly)
 require(shapr)
 require(lime)
 require(flextable)
-```
 
-## Chapter 4: Findings
-
-This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses, building up to the creation of the decision framework aiding model selection. These analyses include the predictive performance, explanation fidelity, explanation stability, and the synthesis of these three into a decision framework matrix. The chapter bases all comparisons on the 5 models ran in chapter 3, listed in the table below. They are described with their respective complexity measures, although the measures are model-specific and do not show relative complexity across the models.
-
-```{r eval-load, include=FALSE, echo=FALSE}
 # Load workspace from previous chapter
 ev   <- readRDS("final_evaluation_results.rds")
 shp  <- readRDS("explain_shap_main.rds")
@@ -140,53 +131,15 @@ themed_table <- function(df, caption = NULL, align = NULL, size = tbl_size) {
   autofit(ft)
 }
 
-
 ```
 
-```{r tab-complexity, echo=FALSE}
-cx <- ev$complexity 
+## Chapter 4: Findings
 
-themed_table(
-  data.frame(Model = lab(cx$model),
-             Measure    = cx$measure, 
-             Complexity = format(cx$value, big.mark = ",", trim = TRUE)),   caption = "Model Complexity", 
-  align = "llr"
-)
-```
+This chapter builds on the empirical research documented in the methodology chapter. It presents the results of the various analyses, building up to the creation of the decision framework aiding model selection.
 
 ### Predictive Performance Results
 
-The accuracy of the models tested in the methodology chapter is measured in 4 ways: deviance, log-likelihood, Gini coefficient, and calibration. Mean Poisson deviance is a uniquely suited measure of predictive accuracy as it punishes near-zero predictions and underestimated small true counts, more than over-predictions of large counts. The mean Poisson log–likelihood estimates the probability of predicting the actual number of events under scrutiny, and then averages the logarithm of this probability over all the data. The exposure weighted Gini index scores the effectiveness of each model at predicting the claim counts, adjusted for the respective exposure levels. Calibration refers to the ratio of predicted to observed claims. A score of 1 implies that the model is unbiased in estimating the number of claims.
-
-```{r, eval=FALSE, echo=TRUE}
-# Metrics
-dev_terms <- function(y, mu) 2*(ifelse(y>0, y*log(y/mu), 0) - (y-mu))
-poisson_deviance <- function(y, mu) mean(dev_terms(y, mu))
-poisson_loglik   <- function(y, mu) mean(dpois(y, mu, log = TRUE))
-
-# Exposure-weighted Gini
-
-gini_lorenz <- function(y, mu_vec, expo) {
-  ord <- order(mu_vec/expo)
-  x <- c(0, cumsum(expo[ord])/sum(expo))
-  l <- c(0, cumsum(y[ord])/sum(y))
-  n <- length(x)
-  auc <- sum((x[-1] - x[-n]) * (l[-1] + l[-n]) / 2)
-  1-2*auc
-}
-
-metric_row <- function(model, set, df, mu_vec) {
-  data.frame(model       = model, 
-             set         = set, 
-             deviance    = poisson_deviance(df$ClaimNb, mu_vec),
-             loglik      = poisson_loglik(df$ClaimNb, mu_vec),
-             calibration = sum(mu_vec)/sum(df$ClaimNb), # predicted/observed
-             gini        = gini_lorenz(df$ClaimNb, mu_vec, df$Exposure)
-  )
-}
-```
-
-The study ranks the predictive performance of the model classes as GBM, then ANN, then GLM. This trend in the selected model scores in the four measures is summarised in the table below. The sensitivity models are included to test whether the configuration choice outweighs model choice in determining the predictive performance of the respective models. However, they follow the same trend described above, with the GBM sensitivity model scoring 0.2427 and the ANN sensitivity scoring 0.2454 on deviance. This means that the configuration choice does not affect the ranking of the model classes.
+The study ranks the predictive performance of the model classes as GBM, then ANN, then GLM. The sensitivity models are included to test whether the configuration choice significantly affects predictive performance of the respective models. However, they follow the same trend, with the GBM sensitivity model scoring 0.2427 and the ANN sensitivity scoring 0.2454 on deviance. This means that the configuration choice does not affect the ranking of the model classes.
 
 ```{r tab-test-performance, echo=FALSE}
 te <- ev$metrics[ev$metrics$set == "test", ]
@@ -202,9 +155,9 @@ themed_table(
 )
 ```
 
-The study compares the models in pairs to validate the consistency of the deviance ranking above on the same test policies. It uses 3,000 bootstrap resamples of covariate-profile groups in the test dataset. The table below summarises this comparison. For instance, the selected GBM outperforms the GLM by 2.6% given by the 0.0064 difference in deviance on a 95% confidence interval where the two have a deviance of 0.0037 to 0.0108. Similarly, the selected ANN improves on the GLM by 1.1% and the selected GBM improves on the ANN by 1.4%. During tuning, the cross-validated loss shows changes that guide the selection of the optimal hyperparameter configuration. However, the tuning surfaces are flat for both boosting machines and neural networks. Therefore, the choice of configuration does not make a practical difference in the accuracy of the model. Similarly, ranking is preserved by the sensitivity configurations, meaning that the simplicity rule applied does not affect predictive accuracy on held-out data.
+From 3,000 bootstrap resamples of covariate-profile groups in the test dataset, the investigation builds the table below to summarise this comparison. The selected GBM outperforms the GLM by 2.6% given by the 0.0064 difference in deviance on a 95% confidence interval where the two have a deviance of 0.0037 to 0.0108. Similarly, the selected ANN improves on the GLM by 1.1% and the selected GBM improves on the ANN by 1.4%. During tuning, the cross-validated loss shows changes that guide the selection of the optimal hyperparameter configuration. However, the tuning surfaces are flat for both boosting machines and neural networks. Therefore, the choice of configuration does not make a practical difference in the accuracy of the model. Similarly, ranking is preserved by the sensitivity configurations, meaning that the simplicity rule applied does not affect predictive accuracy on held-out data.
 
-```{r}
+```{r fig-paired-differences-in-test-deviance}
 # ---- Paired differences in test deviance (forest plot) ------------
 d1 <- ev$diff_table
 d1$comparison <- paste(model_labels[d1$first], "vs", model_labels[d1$second])
@@ -217,25 +170,10 @@ fig1 <- ggplot(d1, aes(x = diff, y = comparison)) +
   geom_pointrange(aes(xmin = lo, xmax = hi)) +
   labs(x = "Difference in mean test deviance (negative: first model better)", 
        y = NULL) + base_theme
-save_fig(fig1, "fig1_paired_differences")
+fig1
 ```
 
-```{r tab-paired, echo=FALSE}
-pd <- ev$diff_table
-
-themed_table(
-  data.frame(Comparison = paste(lab(pd$first), "vs", lab(pd$second)),
-             `Difference in deviance (95% CI)` = 
-               sprintf("%.4f (%.4f, %.4f)", pd$diff, pd$lo, pd$hi),
-             `Share of resamples where first is better` =
-               sprintf("%.1f%%", 100 * pd$share_first_better),
-             check.names = FALSE),
-  align = "lrr",
-  caption = paste("Paired differences in mean test deviance (first minus second; negative means the", "first model is better), with 95% group-bootstrap intervals.")
-)
-```
-
-The study also reviews the train-test gap in accuracy, which defines overfitting in the study. The deviance gap, as illustrated in the table below, is larger in more flexible models. The gap ranges between 0.0075 and 0.0113 across all five models. This gap indicates minimal overfitting as the GLM is completely deterministic. Measuring against it as a benchmark, the models show an even narrower gap, 0.002 and 0.004 for the GBM and 0.001 for both ANNs. As per the discussion in the literature review, overfitting tends to follow the same order as predictive accuracy. Gini index shows a similar trend, albeit with a much smaller gap between train and test runs. ANN, for instance, shows differences in the third decimal place when adjusted with the gap in the GLM.
+The study also reviews the train-test gap in accuracy, which defines overfitting in the study. The deviance gap, as illustrated in the table below, is larger in more flexible models. The gap ranges between 0.0075 and 0.0113 across all five models. This gap indicates minimal overfitting as the GLM is completely deterministic. Measuring against it as a benchmark, the models show an even narrower gap, 0.002 and 0.004 for the GBM and 0.001 for both ANNs. Gini index shows a similar trend, albeit with a much smaller gap between train and test runs.
 
 ```{r tab-train-test, echo=FALSE}
 m  <- ev$metrics
@@ -252,7 +190,7 @@ themed_table(
              `Gini gap`        = fmt(tr$gini - te$gini, 3),
              check.names = FALSE),
   align = "lrrrrrr", 
-  caption = "Training and test performance by model. Gaps are test minus train deviance and train minus test Gini."
+  caption = "Training and Test Performance Gaps"
 )
 ```
 
@@ -260,7 +198,21 @@ themed_table(
 
 #### Explanation Fidelity Results
 
-The study examines explanation fidelity as a measure of the accuracy of the respective XAI method. The study uses faithfulness correlation, SHAP faithfulness RMSE, and LIME's surrogate $R^2$ to measure explanation fidelity. Fidelity examines how accurate a model's feature attributions are in their description of its behaviour. The faithfulness RMSE quantifies the missed explanation as a root mean squared gap between the XAI' predicted drop in the prediction and the actual drop from running the model being explained. The table below reports the fidelity correlation between the SHAP attribution sums for features and the drops in prediction when the study uses background-value masking. This correlation is averaged over all the policies explained. The table also shows the correlation standard error across policies. Since it is additive on the log scale, removing a set of features from a GLM input set reduces the contribution by the sum of the attributions of the missing features. Therefore, its fidelity correlation is 1 and the RMSE is near-zero (rounded in the table).
+Fidelity examines how accurate a model's feature attributions are as a description of its behaviour. The efficiency check tests the gap between the sum of a policy's SHAP attributions and its prediction, less the baseline, in log frequency units, and returns the maximum efficiency error for each model class which is consistently under the 1e-8 threshold.
+
+```{r tab-efficiency, echo=FALSE}
+eff <- shp$efficiency_error   # largest error per model, from the full run
+themed_table(
+  data.frame(Model = as.character(lab(names(eff))),
+             `Max efficiency error` = format(eff, scientific = TRUE, digits = 3),
+             Threshold = "1e-8",
+             Pass = ifelse(eff < 1e-8, "Yes", "No"),
+             check.names = FALSE),
+  caption = paste("Efficiency Check"),
+  align = "lrrc")
+```
+
+Fidelity is measured through the faithfulness correlation. Since a GLM is additive on the log scale, removing a set of features from the dataset reduces the contribution by the sum of the attributions of the missing features. Its faithfulness correlation is 1 and the RMSE is near-zero. With this definition,the GLM's fidelity serves as a reliable benchmark to help one understand fidelity in other models. The fidelity of selected GBM and ANN models have a SHAP fidelity correlation of 0.974 and 0.973 respectively. Their sensitivity versions show a correlation of 0.970 and 0.972. SHAP faithfulness RMSE quantifies the error demonstrated by determining the root mean squared gap between SHAP's predicted drop in the prediction and the actual deviation that occurs when the model is ran and explained. As shown below, the RMSE, which is reported in log units, ranges between 0.067 and 0.079. This represents an error ranging between 7% and 8%.
 
 ```{r tab-shap-fidelity-summary, echo=FALSE}
 fidelity <- shp$shap_faith_summary
@@ -275,96 +227,31 @@ themed_table(
   ),
   align = "lrrr",
   
-  caption = paste(
-    "SHAP fidelity averaged across explained test policies.",
-    "Correlation measures association between SHAP attribution sums and",
-    "prediction drops under background-value masking; RMSE measures their",
-    "average difference on the log-frequency scale."
+  caption = paste("SHAP fidelity averaged across explained test policies"
   )
 )
 ```
 
-```{r tab-shap-fidelity-by-risk-decile, echo=FALSE}
-decile_matrix <- shp$shap_faith_decile
+The correlations above do not effectively distinguish the fidelity between the models, as their variations are within noise. This is especially true given the standard error ranging at about 0.0015. However, there is a distinctive drop in the correlation for the sensitivity models which are more complex than the selected ones. There is also a trend where all the 5 models show a slightly reduced fidelity in the middle deciles, dropping to around 0.96. This is better illustrated in the figure below.
 
-fidelity_decile <- data.frame(
-  `Predicted-risk decile` = as.integer(rownames(decile_matrix)),
-  decile_matrix,
-  check.names = FALSE
-)
-fidelity_decile <- fidelity_decile[
-  order(fidelity_decile$`Predicted-risk decile`),
-  ,
-  drop = FALSE
-]
-
-model_columns <- setdiff(names(fidelity_decile), "Predicted-risk decile")
-
-fidelity_decile[model_columns] <- lapply(
-  fidelity_decile[model_columns],
-  fmt,
-  d = 3
-)
-names(fidelity_decile)[match(model_columns, names(fidelity_decile))] <-
-  lab(model_columns)
-
-themed_table(
-  fidelity_decile,
-  align = c("r", rep("r", length(model_columns))),
-  
-  caption = paste(
-    "Mean SHAP fidelity correlation by predicted-risk decile.",
-    "Deciles are defined using GBM-selected predicted risk."
-  )
-)
+```{r tab-shap-fidelity-by-risk-band, echo=FALSE}
+fd <- as.data.frame(as.table(as.matrix(shp$shap_faith_decile)))
+names(fd) <- c("decile", "model", "faith_cor")
+fd$decile <- as.integer(as.character(fd$decile)); fd$lab <- lab(fd$model)
+fidelity_by_risk_band <- ggplot(fd, aes(x = decile, 
+                                        y = faith_cor, 
+                                        olour = lab, 
+                                        shape = lab, 
+                                        linetype = lab, 
+                                        group = lab)) +
+  geom_line() + geom_point(size = 1.8) +
+  scale_x_continuous(breaks = 1:10) + scale_model() +
+  labs(x = "Predicted-risk decile (1 = lowest)", y = "SHAP faithfulness (correlation)") +
+  base_theme
+fidelity_by_risk_band
 ```
 
-```{r tab-rq1-performance-and-fidelity, echo=FALSE}
-rq1 <- lm_$rq1
-
-themed_table(
-  data.frame(
-    Model = lab(rq1$model),
-    `Complexity measure` = rq1$measure,
-    `Complexity value` = format(rq1$value, big.mark = ",", trim = TRUE),
-    `Test deviance` = fmt(rq1$deviance),
-    `Test Gini` = fmt(rq1$gini),
-    `SHAP faithfulness correlation` = fmt(rq1$faith_cor),
-    `SHAP faithfulness RMSE` = fmt(rq1$faith_rmse),
-    `LIME surrogate R-squared` = fmt(rq1$lime_r2),
-    `LIME faithfulness correlation` = ifelse(
-      is.na(rq1$lime_faith_cor), "Not assessed", fmt(rq1$lime_faith_cor)
-    ),
-    check.names = FALSE
-  ),
-  align = "llrrrrrrr",
-  
-  caption = paste(
-    "Test performance, model complexity, and explanation fidelity.",
-    "LIME results use prespecified bins."
-  )
-)
-```
-
-#### Explanation Stability Results
-
-```{r tab-lime-bin-specification, echo=FALSE}
-bins <- lm_$bin_table
-
-themed_table(
-  data.frame(
-    Feature = bins$feature,
-    Bin = bins$bin,
-    `Lower edge` = bins$lower_edge,
-    `Share of training data` = sprintf("%.1f%%", 100 * bins$share_of_train),
-    `Representative value` = fmt(bins$representative),
-    check.names = FALSE
-  ),
-  align = "llrrr",
-  
-  caption = "Prespecified LIME bins, training-data shares, and representative values."
-)
-```
+Fidelity is also examined for LIME. The variation of the surrogate $R^2$ between the 5 models is shown below. While the GLM retains the highest correlation, it has a faithfulness lower than 1 because unlike with SHAP, its weights are coefficients of the surrogate model rather than exact contributions. The LIME surrogate's fit, faithfulness, and stability are summarised in the table below, by binning scheme and model.
 
 ```{r tab-lime-metrics, echo=FALSE}
 lime <- lm_$lime_summary
@@ -392,56 +279,54 @@ themed_table(
   align = "llrrrrrrr",
   
   caption = paste(
-    "LIME surrogate fit, faithfulness, and stability by binning scheme and model.",
-    "Higher values indicate greater agreement or stability, except relative attribution SD,",
-    "for which lower values indicate less variation."
+    "LIME Surrogate Fit, Faithfulness, and Stability"
   )
 )
 ```
 
-```{r tab-lime-local-rank-by-scheme, echo=FALSE}
-rank_mat <- with(
-  lime,
-  tapply(local_rank_cor, list(scheme, model), identity)
-)
-rank_display <- apply(rank_mat, c(1, 2), fmt)
+As shown in the trends above, the explanation fidelity falls from 1 to 0.97 in the first step down from the GLM. After this initial drop, the correlation remains flat with variations in the predictive performance. This suggests that non-additivity has the highest impact on explanation fidelity. This suggests that predictive performance and explanation fidelity do not exhibit monotonic co-variation. The figure below illustrates this relationship succinctly, plotting fidelity against performance.
 
-rank_table <- data.frame(
-  Scheme = unname(scheme_labels[rownames(rank_mat)]),
-  rank_display,
-  check.names = FALSE
-)
-names(rank_table)[-1] <- lab(colnames(rank_mat))
-
-themed_table(
-  rank_table,
-  align = c("l", rep("r", ncol(rank_table) - 1)),
-  
-  caption = "Mean local feature-rank correlation across repeated LIME explanations."
-)
+```{r tab-rq1-performance-and-fidelity, echo=FALSE}
+d2 <- merge(ev$single_ci[, c("model", "deviance", "dev_lo", "dev_hi")],
+            shp$shap_faith_summary[, c("model", "faith_cor", "faith_cor_se")], by = "model")
+d2$lab    <- lab(d2$model)
+d2$fid_lo <- d2$faith_cor - 1.96 * d2$faith_cor_se
+d2$fid_hi <- pmin(1, d2$faith_cor + 1.96 * d2$faith_cor_se)
+pvf <- ggplot(d2, aes(x = deviance, y = faith_cor, colour = lab, shape = lab)) +
+  geom_linerange(aes(ymin = fid_lo, ymax = fid_hi), alpha = 0.7) +
+  geom_linerange(aes(xmin = dev_lo, xmax = dev_hi), alpha = 0.3) +
+  geom_point(size = 3) +
+  geom_text(aes(label = lab), vjust = -1.2, size = 3, show.legend = FALSE) +
+  scale_x_reverse() +
+  scale_model() +
+  labs(x = "Mean test deviance (reversed: better to the right)",
+       y = "SHAP faithfulness (correlation)") +
+  base_theme + theme(legend.position = "none")
+pvf
 ```
 
-```{r tab-lime-surrogate-r2-by-scheme, echo=FALSE}
-r2_mat <- with(
-  lime,
-  tapply(lime_r2, list(scheme, model), identity)
-)
-r2_display <- apply(r2_mat, c(1, 2), fmt)
+The pattern indicated in the figure is elaborated in the table below, illustrating the meagre gains in explanation fidelity with increase in predictive performance. The LIME results use the prespecified binning approach.
 
-r2_table <- data.frame(
-  Scheme = unname(scheme_labels[rownames(r2_mat)]),
-  r2_display,
-  check.names = FALSE
-)
-names(r2_table)[-1] <- lab(colnames(r2_mat))
+#### Explanation Stability Results
 
+The standard deviation of attribution ranges from 0.0195 to 0.0222 log units, evening out to about 2% for every model. The local rank correlation is the lowest for the GLM at 0.873, and highest for the selected GBM at 0.914. Sign agreement shows a different order from the other metrics, ranging from 0.966 for the ANN sensitivity model to 0.983 for the GLM. These metrics summarise the explainer-noise floor as shown below:
+
+```{r tab-noise-floor, echo=FALSE}
+f1 <- stab$stab_axis1   # axis 1: same fitted model, repeated background samples
 themed_table(
-  r2_table,
-  align = c("l", rep("r", ncol(r2_table) - 1)),
-  
-  caption = "Mean LIME surrogate R-squared by binning scheme and model."
-)
+  data.frame(Model                          = as.character(lab(f1$model)),
+             `SD of attribution (log units)` = sprintf("%.4f", f1$mean_sd_phi),
+             `Premium-equivalent (%)`        = sprintf("%.1f", 100 * f1$premium_equiv),
+             `Local rank correlation`        = sprintf("%.3f", f1$local_rank_cor),
+             `Sign agreement`                = sprintf("%.3f", f1$sign_agreement),
+             check.names = FALSE),
+  caption = sprintf(paste("Explainer-noise floor: each fitted model explained %d times with different",
+                          "50-row background samples, for the same 100 policies (SHAP). The floor",
+                          "depends on the background size."), f1$R[1]),
+  align = "lrrrr")
 ```
+
+The table below shows the variation of variables in `shap_metrics()` across the 3 model classes refitted on grouped bootstrap samples.
 
 ```{r tab-shap-stability-under-refits, echo=FALSE}
 stability <- lm_$rq3
@@ -463,21 +348,251 @@ themed_table(
   ),
   align = "lr",
   
-  caption = "SHAP stability metrics for models refitted on grouped bootstrap samples."
+  caption = "SHAP Stability Metrics"
 )
 ```
 
-`stability_metrics` defines a number of stability metrics that capture different aspects of the change in SHAP explanations.
+Although it uses the same binning techniques as SHAP, the LIME stability calculation uses a different sampling protocol, with 10 repeats on the same 60 policies with different random perturbations. The GLM has the lowest relative standard deviation but the highest sign agreement under the 3 binning approaches. As illustrated below, the ordering of the three model classes changes with the binning scheme. The global rank correlation and the top 3 overlap for all the models lie near the ceiling, ranging between 0.98 and 1.
 
-1.  **Global rank correlation**: Shows whether the ranking of the feature feature importance is preserved across refits.
-2.  **Local rank correlation**: Shows whether the ordering of features is preserved for individual policies
-3.  **Profile distance**: Captures scale free reallocation, which is a measure of the movement of total attributions between drivers. 0 means that the attributions are identical, and 1 means that the attributions are disjoint
-4.  **SD of attributions**: This measures the variation of a feature's contribution, in log units, or for the premium equivalent, as a vectored percentage change in premium
-5.  **Relative SD**: Variation scaled by the typical size of an attribution
-6.  **Sign agreement**: This captures how often a material contribution keeps its direction
+```{r tab-lime-stability, echo=FALSE}
+scheme_labels <- c(prespecified_bins = "Fixed bins (primary)", C = "Fixed bins (primary)",
+                   default_lime_bins = "Default bins",         A = "Default bins",
+                   no_bins = "No binning",                     D = "No binning")
+ls_ <- lm_$lime_summary
+sl  <- unname(scheme_labels[as.character(ls_$scheme)])
+sl[is.na(sl)] <- as.character(ls_$scheme)[is.na(sl)]
+ls_$scheme_lab <- factor(sl, levels = c("Fixed bins (primary)", "Default bins", "No binning"))
+ls_ <- ls_[order(ls_$scheme_lab, as.integer(lab(ls_$model))), ]
+
+themed_table(
+  data.frame(Scheme                    = ifelse(duplicated(ls_$scheme_lab), "", as.character(ls_$scheme_lab)),
+             Model                     = as.character(lab(ls_$model)),
+             `Relative SD`             = sprintf("%.3f", ls_$rel_sd),
+             `Sign agreement`          = sprintf("%.3f", ls_$sign_agreement),
+             `Local rank correlation`  = sprintf("%.3f", ls_$local_rank_cor),
+             `Global rank correlation` = sprintf("%.3f", ls_$global_rank_cor),
+             `Top-3 overlap`           = sprintf("%.3f", ls_$top3_overlap),
+             check.names = FALSE),
+  caption = sprintf(paste("LIME explainer-noise stability")),
+  align = "llrrrrr"
+  )
+```
+
+For both SHAP and LIME, explanation instability increases with model flexibility. For ANN and GBM, this instability exceeds the explainer-noise floor established by the instability of GLMs. It is largely inherited from prediction instability, and demonstrates reallocation ranging between 1.4 to 1.8 times the explainer-noise while the GLM does not exceed it. The complete results are described in much more detail in the appendix and the study's repository on Github.
 
 ### Decision Matrix
 
-### Limitations
+The evidence matrix below forms the basis for the decision framework. It reports measures of the accuracy, explainability, and robustness aspects of the 5 models tested. The triangles in table headers indicate the direction of better models with regard to that measure. For instance, models with lower deviance are better, so deviance is marked with $▿$.
 
-Although the study designed this methodology to lend the conclusions as much validity as would be expected for its utility, there are some loopholes that are critical to note as the context for its conclusions or for a future study seeking to validate the findings and conclusions herein. First, the marginal value function evaluates unrealistic feature combinations when the variables represented are dependent. Slack et al. discuss this drawback in better detail and demonstrate how perturbation-based explanations are susceptible when explaining such features as area and density, or bonus-malus and age in `freMTPL2freq`. The study also works with small, and arguably insufficient samples such as 300 policies for explanations, 100 for SHAP stability, and 30 refits. While these samples are consistently applied, the study's conclusions may be hindered by the small sample. Given more liberal constraints of computing capabilities, the study would earn more validity supported by the law of large numbers. Another limitation is the small set of points available to exhaustively answer the first research question regarding co-variation, rather than a simple trend. Having only five model points to assess, the study cannot make a definitive inference regarding the co-variation of predictive accuracy and explainability. While fixed hyperparameters enable a better assessment of explanation stability, they conceal the data sensitivity of tuning from the analysis altogether. The limited dimensionality of the data and the use of a single split also limits how much the conclusions made in the study can be generalized.
+```{r tab-evidence-matrix, echo=FALSE}
+te <- ev$metrics[ev$metrics$set == "test", c("model", "deviance", 
+                                             "gini", "calibration")]
+fi <- shp$shap_faith_summary[, c("model", "faith_cor", "faith_rmse")]
+st <- stab$stab_axis2[, c("model", "premium_equiv", 
+                          "sign_agreement", "profile_tv")]
+
+evidence_matrix <- Reduce(function(a, b) merge(a, b, by = "model", all.x = TRUE), 
+                          list(te, fi, st))
+evidence_matrix <- evidence_matrix[match(names(model_labels), 
+                                         evidence_matrix$model), ]
+f  <- function(x, d) ifelse(is.na(x), "–", formatC(x, format = "f", digits = d))
+
+themed_table(
+  data.frame(Model                       = as.character(lab(evidence_matrix$model)),
+             `Deviance ▿`                = f(evidence_matrix$deviance, 4),
+             `Gini ▵`                    = f(evidence_matrix$gini, 3),
+             `SHAP fidelity ▿`           = f(evidence_matrix$faith_rmse, 4),
+             `Refit SD, premium % ▿`     = f(100 * evidence_matrix$premium_equiv, 1),
+             `Sign agreement ▵`          = f(evidence_matrix$sign_agreement, 3),
+             `Profile distance ▿`        = f(evidence_matrix$profile_tv, 3),
+             check.names = FALSE),
+  caption = paste("Evidence Matrix: Test-Set Performance, SHAP Fidelity, and Refit Stability"),
+  align = "lrrrrrr")
+```
+
+The study considers three scenarios to determine the weights.
+
+- Accuracy led pricing - Aiming for the most competitive pricing
+- Governance led pricing - Aiming for the most transparent and stable prices
+- Balanced pricing - Aiming for a balance between transparency and competitive pricing
+
+The above approaches are actualized in the matrix by the proportional weights assigned to the respective measures. The matrix for the accuracy led pricing approach takes shape by assigning a weight 60 points for performance, with a disproportionately high weight assigned to Gini than to test deviance. It assigns equal points for refit SD, sign agreement, and profile distance to make 20 robustness points, and 20 points for SHAP fidelity through the fidelity RMSE. The resulting ranking is shown below:
+
+```{r decision-framework-rubric, echo=FALSE}
+# -------------------------- 1. The rubric ----------------------------
+criteria <- data.frame(
+  criterion       = c("Deviance", "Gini", 
+                      "Refit SD (premium %)", "Sign agreement",
+                      "Profile distance", "Fidelity RMSE (log units)"),
+  
+  column          = c("deviance", "gini", 
+                      "refit_sd_pct", "sign_agreement",
+                      "profile_tv", "faith_rmse"),
+  
+  pillar          = c("Performance", "Performance", 
+                      "Robustness", "Robustness",
+                      "Robustness", "Explainability"),
+  # deviance is the primary scoring rule
+  share_in_pillar = c(0.60, 0.40, 1/3, 1/3, 1/3, 1),
+  # sign agreement cannot fall below 0.5 
+  worst           = c(0.2550, 0.200, 5.0, 0.5, 0.25, 0.10),   
+  best            = c(0.2400, 0.350, 0.0, 1.0, 0.00, 0.00),
+  stringsAsFactors = FALSE
+)
+stopifnot(all(abs(tapply(criteria$share_in_pillar, 
+                         criteria$pillar, sum) - 1) < 1e-9))
+
+# ------------------------- 2. Candidate models -----------------------------
+models_with_stability <- evidence_matrix[!is.na(evidence_matrix$premium_equiv), ]
+models_with_stability$refit_sd_pct <- 100 * models_with_stability$premium_equiv
+model_names <- as.character(lab(models_with_stability$model))
+
+score_criterion <- function(value, worst, best) {
+  pmin(pmax((value - worst) / (best - worst), 0), 1)
+}
+criterion_scores <- sapply(seq_len(nrow(criteria)), function(i)
+  score_criterion(models_with_stability[[criteria$column[i]]], 
+                  criteria$worst[i], criteria$best[i]))
+colnames(criterion_scores) <- criteria$criterion
+rownames(criterion_scores) <- models_with_stability$model
+
+pillars <- unique(criteria$pillar)
+
+# each pillar on a 0-1 scale
+pillar_scores_01 <- sapply(pillars, function(p) {
+  k <- criteria$pillar == p
+  as.numeric(criterion_scores[, k, drop = FALSE] %*% criteria$share_in_pillar[k])
+})
+rownames(pillar_scores_01) <- rownames(criterion_scores)
+
+# ------------------- 3. Points for a set of pillar weights -------------------
+compute_points <- function(pillar_weights) {
+  stopifnot(setequal(names(pillar_weights), pillars), 
+            abs(sum(pillar_weights) - 100) < 1e-9)
+  criterion_weights <- unname(pillar_weights[criteria$pillar]) * criteria$share_in_pillar
+  by_criterion <- sweep(criterion_scores, 2, criterion_weights, "*")
+  by_pillar <- sapply(pillars, function(p) rowSums(by_criterion[, criteria$pillar == p, 
+                                                                drop = FALSE]))
+  list(pillar_weights = pillar_weights, criterion_weights = criterion_weights,
+       by_criterion = by_criterion, by_pillar = by_pillar, total = rowSums(by_criterion))
+}
+
+fmt_points <- function(x) formatC(x, format = "f", digits = 1)
+
+# ----------------------- 4. Tables for one scenario -------------------------
+# tie_tolerance_points: models within this many points of the leader are reported as not separable.
+
+build_scenario_tables <- function(weight_performance, weight_robustness, 
+                                  weight_explainability,
+                                  scenario_name, tie_tolerance_points = 2) {
+  points <- compute_points(c(Performance = weight_performance, 
+                             Robustness = weight_robustness,
+                             Explainability = weight_explainability))
+  display_order  <- order(-points$total)
+  rank_by_points <- rank(-points$total, ties.method = "min")
+  within_tolerance <- points$total >= max(points$total) - tie_tolerance_points
+
+  pillar_table_data <- data.frame(Model = model_names[display_order], check.names = FALSE)
+  for (p in pillars) {
+    pillar_table_data[[sprintf("%s (%g)", p, points$pillar_weights[[p]])]] <-
+      fmt_points(points$by_pillar[display_order, p])
+  }
+  pillar_table_data[["Total (100)"]] <- fmt_points(points$total[display_order])
+  pillar_table_data[["Rank"]] <- rank_by_points[display_order]
+  pillar_table_data[["Within tolerance of top"]] <- ifelse(within_tolerance[display_order], 
+                                                           "Yes", "No")
+
+  criterion_table_data <- data.frame(Model = model_names[display_order], check.names = FALSE)
+  for (j in seq_len(nrow(criteria))) {
+    criterion_table_data[[sprintf("%s (%s)", 
+                                  criteria$criterion[j], 
+                                  fmt_points(points$criterion_weights[j]))]] <-
+      fmt_points(points$by_criterion[display_order, j])
+  }
+  criterion_table_data[["Total (100)"]] <- fmt_points(points$total[display_order])
+
+  list(
+    pillars  = themed_table(pillar_table_data,
+                            caption = paste0(scenario_name, 
+                                             ": pillar summary (points out of 100)"),
+                            align = paste0("l", strrep("r", 
+                                                       ncol(pillar_table_data) - 1))),
+    criteria = themed_table(criterion_table_data,
+                            caption = paste0(scenario_name, 
+                                             ": points by criterion (maximum in brackets)"),
+                            align = paste0("l", strrep("r", 
+                                                       ncol(criterion_table_data) - 1))),
+    points   = points
+  )
+}
+
+# --------- 5. Checks on what the weights actually do -----------------
+# Spread of points across models for each pillar: a pillar whose models score alike cannot change the
+# ranking, whatever its nominal weight.
+effective_weights <- function(points) {
+  spread <- apply(points$by_pillar, 2, function(x) max(x) - min(x))
+  data.frame(Pillar = names(spread),
+             `Nominal weight` = points$pillar_weights[names(spread)],
+             `Spread of points across models` = fmt_points(spread),
+             `Effective share (%)` = fmt_points(100 * spread / sum(spread)),
+             check.names = FALSE, row.names = NULL)
+}
+
+# Share of random pillar weightings (uniform over all weights summing to 100) in which each model ranks first
+share_ranked_first <- function(n_draws = 10000, seed = 2034) {
+  set.seed(seed)
+  w <- matrix(rexp(n_draws * length(pillars)), ncol = length(pillars))
+  w <- 100 * w / rowSums(w)
+  totals  <- pillar_scores_01 %*% t(w)  # models x draws
+  winners <- factor(rownames(pillar_scores_01)[apply(totals, 2, which.max)],
+                    levels = rownames(pillar_scores_01))
+  data.frame(Model = model_names,
+             `Share of weightings ranked first (%)` = fmt_points(100 * as.numeric(table(winners)) / n_draws),
+             check.names = FALSE)
+}
+```
+
+```{r accuracy-led-pricing, echo=FALSE}
+scenario_accuracy_led <- build_scenario_tables(weight_performance = 60, 
+                                               weight_robustness = 20,
+                                               weight_explainability = 20,
+                                               scenario_name = "Accuracy-led pricing")
+scenario_accuracy_led$pillars
+scenario_accuracy_led$criteria
+
+themed_table(effective_weights(scenario_accuracy_led$points), 
+             caption = "Nominal and effective weights")
+themed_table(share_ranked_first(), caption = "Rank-first share across random weightings")
+```
+
+In a similar way, governance-led pricing reverses the weights assigned, to prioritise robustness and explainability over performance.
+
+```{r governance-pricing, echo=FALSE}
+scenario_governance_led <- build_scenario_tables(weight_performance = 20, 
+                                                 weight_robustness = 60,
+                                                 weight_explainability = 20,
+                                                 scenario_name = "Governance-led pricing")
+scenario_governance_led$pillars
+scenario_governance_led$criteria
+
+themed_table(effective_weights(scenario_governance_led$points), 
+             caption = "Nominal and effective weights")
+themed_table(share_ranked_first(), caption = "Rank-first share across random weightings")
+```
+
+The balanced approach evens out the weights between the three criteria. The models rank as follows:
+
+```{r balanced-pricing, echo=FALSE}
+scenario_balanced_led <- build_scenario_tables(weight_performance = 34, 
+                                                 weight_robustness = 33,
+                                                 weight_explainability = 33,
+                                                 scenario_name = "Balanced pricing")
+scenario_balanced_led$pillars
+scenario_balanced_led$criteria
+
+themed_table(effective_weights(scenario_balanced_led$points), 
+             caption = "Nominal and effective weights")
+themed_table(share_ranked_first(), caption = "Rank-first share across random weightings")
+```
+
+For a more detailed perspective into this decision framework, the specific drivers for the different pricing strategies are shown in the breakdowns below.
