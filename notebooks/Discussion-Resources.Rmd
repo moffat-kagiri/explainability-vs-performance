@@ -1,0 +1,301 @@
+---
+title: "Appendices"
+author: "Moffat Kagiri Ngugi"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include = FALSE, echo = FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(
+  dpi = 600,
+  out.width = "100%",
+  fig.width = 7.5,
+  fig.height = 4.5,
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE
+)
+require(MASS)
+require(tidyverse)
+require(dplyr)
+require(ggplot2)
+require(gridExtra)
+require(patchwork)
+require(sf)
+require(rnaturalearth)
+require(rnaturalearthhires)
+require(stringi)
+require(plotly)
+require(shapr)
+require(lime)
+require(flextable)
+
+# Load workspace from previous chapter
+ev   <- readRDS("final_evaluation_results.rds")
+shp  <- readRDS("explain_shap_main.rds")
+stab <- readRDS("explain_shap_stability.rds")
+lm_  <- readRDS("explain_lime_and_summary.rds")
+dec  <- readRDS("explain_ann_decomposition.rds")
+
+model_labels <- c(GLM = "GLM",
+                  GBM_selected = "GBM (selected)",                   
+                  GBM_sensitivity = "GBM (sensitivity)",
+                  ANN_selected    = "ANN (selected)", 
+                  ANN_sensitivity = "ANN (sensitivity)") 
+
+lab <- function(x) unname(model_labels[as.character(x)]) 
+fmt <- function(x, d = 4) formatC(x, format = "f", digits = d)
+
+
+gbm_lock <- readRDS("model_selection_locked.rds") # grouped GBM grid and the two locked choices
+ann_lock <- readRDS("ann_selection_locked.rds")    # ANN grid and the two locked choices
+
+# ------------ Define Styles and Other Methods for Plots ------------
+
+SAVE_FIGS <- FALSE   # TRUE writes 300-dpi PNGs to ./figures 
+save_fig <- function(p, name, w = 6.5, h = 4) {
+  if (SAVE_FIGS) {
+    dir.create("figures", showWarnings = FALSE)
+    ggsave(file.path("figures", paste0(name, ".png")), p, width = w, height = h, dpi = 300)
+  }
+  invisible(p)
+}
+
+map_low    <- "#E0F7FA"
+map_high   <- "#0288D1"
+map_na     <- "#ECEFF1"
+blue_dark  <- "#01579B"   # darker shade of map's high colour (text, GLM)
+blue_mid   <- map_high
+blue_light <- "#B3E5FC"   # between the map's low and high colours
+blue_grid  <- map_na
+
+# Model colours: dark blue = GLM, blues = GBM, teal = ANN (five shades of
+# one hue cannot be told apart reliably, so shapes and line types repeat 
+# the distinction)
+model_order  <- c("GLM", 
+                  "GBM_selected", 
+                  "GBM_sensitivity", 
+                  "ANN_selected", 
+                  "ANN_sensitivity")
+model_labels <- c(GLM = "GLM", GBM_selected = "GBM (selected)",
+                  GBM_sensitivity = "GBM (sensitivity)",
+                  ANN_selected = "ANN (selected)", 
+                  ANN_sensitivity = "ANN (sensitivity)")
+pal <- c("GLM" = blue_dark, 
+         "GBM (selected)" = blue_mid, 
+         "GBM (sensitivity)" = "#4FC3F7",
+         "ANN (selected)" = "#00838F", 
+         "ANN (sensitivity)" = "#80DEEA")
+shapes <- c("GLM" = 16, 
+            "GBM (selected)" = 17, 
+            "GBM (sensitivity)" = 2,
+            "ANN (selected)" = 15, 
+            "ANN (sensitivity)" = 0)
+ltypes <- c("GLM" = "solid", 
+            "GBM (selected)" = "solid", 
+            "GBM (sensitivity)" = "dashed",
+            "ANN (selected)" = "solid", 
+            "ANN (sensitivity)" = "dashed")
+lab <- function(x) factor(unname(model_labels[as.character(x)]), 
+                          levels = unname(model_labels))
+
+# "sans" maps to Arial on Windows
+base_theme <- theme_minimal(base_size = 11, base_family = "sans") +
+  theme(legend.position = "bottom", legend.title = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour = blue_grid),
+        strip.text = element_text(colour = blue_dark, face = "bold"),
+        axis.text = element_text(colour = "grey25"))
+
+# Shared scales for the model palette
+scale_model <- function() list(scale_colour_manual(values = pal),
+                               scale_shape_manual(values = shapes),
+                               scale_linetype_manual(values = ltypes))
+
+# ---------------- Table Theme -----------------
+tbl_size <- 12  # the brief asks for Arial 12 throughout; reduce only if a wide table cannot fit
+
+themed_table <- function(df, caption = NULL, align = NULL, size = tbl_size) {
+  ft <- flextable(df)
+  ft <- font(ft, fontname = "Arial", part = "all")
+  ft <- fontsize(ft, size = size, part = "all")
+  ft <- bg(ft, bg = map_high, part = "header")
+  ft <- color(ft, color = "white", part = "header")
+  ft <- bold(ft, part = "header")
+  if (nrow(df) >= 2) ft <- bg(ft, i = seq(2, nrow(df), by = 2), 
+                              bg = map_low, part = "body")
+  ft <- border_remove(ft)
+  ft <- hline(ft, border = officer::fp_border(color = map_na, width = 1), part = "body")
+  ft <- hline_bottom(ft, border = officer::fp_border(color = blue_dark, 
+                                                     width = 1.5), part = "body")
+  if (!is.null(align)) {                      # e.g. "llr" = left, left, right
+    al <- c(l = "left", c = "center", r = "right")[strsplit(align, "")[[1]]]
+    for (k in seq_along(al)) ft <- align(ft, j = k, align = unname(al[k]), part = "all")
+  }
+  if (!is.null(caption)) ft <- set_caption(ft, caption = caption)
+  autofit(ft)
+}
+
+```
+
+Where does explanation instability come from? Tables and figures for the RQ3 discussion.
+Needs from the setup chunks: lab(), themed_table(), pal, scale_model(), base_theme (figures/table scripts).
+Reads only saved results. SD values are in log-frequency units; premium-equivalent = exp(SD) - 1.
+
+```{r, echo=FALSE}
+library(ggplot2)
+
+models_b <- c("GLM", "GBM_selected", "ANN_selected")
+
+arr_of   <- function(l) array(unlist(l), dim = c(nrow(l[[1]]), 
+                                                 ncol(l[[1]]), length(l)),
+                              # policy x feature x replicate
+                              dimnames = list(NULL, colnames(l[[1]]), NULL)) 
+
+# variance across replicates
+cell_var <- function(l) apply(arr_of(l), c(1, 2), var)
+
+# root-mean-square SD: sources add on this (variance) basis
+rms_sd   <- function(l) sqrt(mean(cell_var(l)))     
+pct      <- function(sd) 100 * (exp(sd) - 1)
+
+# SD in log units -> premium-equivalent %
+sd_pct   <- function(sd) sprintf("%.4f (%.1f%%)", sd, pct(sd))
+
+# ---- Variable check: confirm that the saved columns are what the text says they are ------------
+themed_table(
+  data.frame(
+    model = models_b,
+    floor_saved      = stab$stab_axis1$mean_sd_phi[match(models_b, stab$stab_axis1$model)],
+    floor_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$noise_phi[[m]]), c(1, 2), sd))),
+    refit_saved      = stab$stab_axis2$mean_sd_phi[match(models_b, stab$stab_axis2$model)],
+    refit_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$phi_refit[[m]]), c(1, 2), sd))),
+    pred_sd_saved      = stab$stab_axis2$pred_sd[match(models_b, stab$stab_axis2$model)],
+    pred_sd_recomputed = sapply(models_b, function(m) mean(apply(do.call(cbind, stab$fx_refit[[m]]), 1, sd)))
+    )
+) 
+print(round(check[, -1], 4))
+stopifnot(isTRUE(all.equal(check$floor_saved, check$floor_recomputed)),
+          isTRUE(all.equal(check$refit_saved, check$refit_recomputed)),
+          isTRUE(all.equal(check$pred_sd_saved, check$pred_sd_recomputed)))
+
+```
+
+```{r, echo=FALSE}
+# ---- Table 1: sources of attribution variation (root-mean-square SD, log units and premium %) ------
+noise_rms <- sapply(models_b, function(m) rms_sd(stab$noise_phi[[m]]))
+refit_rms <- sapply(models_b, function(m) rms_sd(stab$phi_refit[[m]]))
+seed_rms  <- rms_sd(dec$seed_phi)                                     # five final ANNs, same background
+stopifnot(abs(seed_rms^2 / refit_rms[["ANN_selected"]]^2 - dec$seed_share) < 1e-6)   # = dec$seed_share
+data_rms  <- c(refit_rms[["GLM"]], refit_rms[["GBM_selected"]], sqrt(refit_rms[["ANN_selected"]]^2 - seed_rms^2))
+sources <- data.frame(
+  Source = c("Explainer noise (50-row background draw)", "Training seed (ANN only)",
+             "Data sensitivity (refit on resampled data)", "Total under refits"),
+  GLM  = c(sd_pct(noise_rms[["GLM"]]), "–", sd_pct(data_rms[1]), sd_pct(refit_rms[["GLM"]])),
+  GBM  = c(sd_pct(noise_rms[["GBM_selected"]]), "–", sd_pct(data_rms[2]), sd_pct(refit_rms[["GBM_selected"]])),
+  ANN  = c(sd_pct(noise_rms[["ANN_selected"]]), sd_pct(seed_rms), sd_pct(data_rms[3]), sd_pct(refit_rms[["ANN_selected"]])),
+  check.names = FALSE)
+tab_sources <- themed_table(sources, align = "lrrr",
+  caption = paste("Sources of variation in a feature's SHAP attribution: SD in log units (premium-equivalent).",
+                  "Explainer noise comes from a separate experiment and is not part of the refit total",
+                  "(the refits use a fixed background). Root-mean-square basis, so seed and data parts add as variances."))
+tab_sources
+```
+
+
+```{r, echo=FALSE}
+# ---- Table 2: prediction-driven movement versus reallocation ---------------------------------------
+# Each attribution vector is split into its equal share of the policy's total and a zero-sum remainder.
+# The remainder moves attribution between features without changing the total (pure reallocation).
+# Derived measure: define it in Chapter 3 (glossary) before using it in the text.
+decompose_sources <- function(l) {
+  a <- arr_of(l); p <- dim(a)[2]
+  s <- apply(a, c(1, 3), sum)                                   # attribution total per policy and replicate
+  zero_sum <- a
+  for (j in seq_len(p)) zero_sum[, j, ] <- a[, j, ] - s / p     # zero-sum (reallocation) part
+  c(total_sd = mean(apply(s, 1, sd)),
+    realloc_share = mean(apply(zero_sum, c(1, 2), var)) / mean(apply(a, c(1, 2), var)))
+}
+dec_refit <- t(sapply(models_b, function(m) decompose_sources(stab$phi_refit[[m]])))
+dec_noise <- t(sapply(models_b, function(m) decompose_sources(stab$noise_phi[[m]])))
+ix2 <- match(models_b, stab$stab_axis2$model); ix1 <- match(models_b, stab$stab_axis1$model)
+realloc <- data.frame(
+  Model = as.character(lab(models_b)),
+  `SD of log-prediction across refits (pred_sd)` = sprintf("%.3f", stab$stab_axis2$pred_sd[ix2]),
+  `SD of attribution total across refits`        = sprintf("%.3f", dec_refit[, "total_sd"]),
+  `Profile distance, refits (profile_tv)`        = sprintf("%.3f", stab$stab_axis2$profile_tv[ix2]),
+  `Profile distance, explainer noise`            = sprintf("%.3f", stab$stab_axis1$profile_tv[ix1]),
+  `Reallocation share of variance, refits`       = sprintf("%.0f%%", 100 * dec_refit[, "realloc_share"]),
+  `Reallocation share of variance, explainer noise` = sprintf("%.0f%%", 100 * dec_noise[, "realloc_share"]),
+  check.names = FALSE)
+tab_realloc <- themed_table(realloc, align = "lrrrrrr",
+  caption = paste("Prediction-driven movement and reallocation. The first two columns should agree (the attribution",
+                  "total moves with the prediction). Reallocation share is the share of attribution variance that",
+                  "leaves the policy's total unchanged."))
+tab_realloc
+```
+
+```{r, echo=FALSE}
+# ---- Table 3 and Figure 1: which features drive the instability ---------------------------------------
+feats_all <- colnames(stab$phi_refit$GLM[[1]])
+feature_tab <- do.call(rbind, lapply(models_b, function(m) {
+  v_refit <- colMeans(cell_var(stab$phi_refit[[m]])); v_noise <- colMeans(cell_var(stab$noise_phi[[m]]))
+  data.frame(model = m, feature = feats_all, refit_pct = pct(sqrt(v_refit)), floor_pct = pct(sqrt(v_noise)),
+             share_of_refit_variance = 100 * v_refit / sum(v_refit))
+}))
+ann_order <- feature_tab$feature[feature_tab$model == "ANN_selected"][
+  order(feature_tab$refit_pct[feature_tab$model == "ANN_selected"])]
+feature_tab$feature <- factor(feature_tab$feature, levels = ann_order)
+feature_tab$lab <- lab(feature_tab$model)
+
+wide_share <- reshape(feature_tab[, c("model", "feature", "share_of_refit_variance")],
+                      idvar = "feature", timevar = "model", direction = "wide")
+wide_share <- wide_share[order(-wide_share$share_of_refit_variance.ANN_selected), ]
+tab_features <- themed_table(
+  data.frame(Feature = as.character(wide_share$feature),
+             GLM = sprintf("%.0f%%", wide_share$share_of_refit_variance.GLM),
+             GBM = sprintf("%.0f%%", wide_share$share_of_refit_variance.GBM_selected),
+             ANN = sprintf("%.0f%%", wide_share$share_of_refit_variance.ANN_selected)),
+  align = "lrrr", caption = "Share of total refit variance in attributions contributed by each feature.")
+tab_features
+```
+
+```{r, echo=FALSE}
+fig_features <- ggplot(feature_tab, aes(x = refit_pct, 
+                                        y = feature, fill = lab)) +
+  geom_col(width = 0.7) +
+  geom_segment(aes(x = floor_pct, xend = floor_pct, 
+                   y = as.numeric(feature) - 0.4, yend = as.numeric(feature) + 0.4),
+               linewidth = 0.9) +                                   
+  # black tick = explainer-noise floor, same model
+  facet_wrap(~ lab) +
+  scale_fill_manual(values = pal) +
+  labs(x = "SD of the feature's attribution across refits (premium-equivalent, %)", y = NULL) +
+  base_theme + theme(legend.position = "none")
+
+fig_features
+```
+
+```{r, echo=FALSE}
+# ---- Figure 2: which policies (instability by predicted-risk decile) -------------------------------------
+# The stability sample is stored in equal blocks by risk decile (decile 1 first).
+n_pol <- nrow(stab$phi_refit$GLM[[1]]); dec_of_policy <- rep(1:10, each = n_pol / 10)
+by_decile <- do.call(rbind, lapply(models_b, function(m) {
+  v <- rowMeans(cell_var(stab$phi_refit[[m]]))                       # per-policy variance, averaged over features
+  data.frame(model = m, decile = 1:10, refit_pct = pct(sqrt(tapply(v, dec_of_policy, mean))))
+}))
+by_decile$lab <- lab(by_decile$model)
+fig_deciles <- ggplot(by_decile, aes(x = decile, y = refit_pct, colour = lab, shape = lab, linetype = lab, group = lab)) +
+  geom_line() + geom_point(size = 1.8) +
+  scale_x_continuous(breaks = 1:10) + scale_model() +
+  labs(x = "Predicted-risk decile (1 = lowest)", y = "SD of attribution across refits (premium-equivalent, %)") +
+  base_theme
+
+# ---- Headline premium-equivalent figures (mean-SD basis, as in the stability table) ---------------------
+headline_premium <- data.frame(model = models_b,
+                               premium_pct = 100 * stab$stab_axis2$premium_equiv[ix2],
+                               floor_pct   = 100 * stab$stab_axis1$premium_equiv[ix1])
+print(headline_premium)
+# Display with: tab_sources, tab_realloc, tab_features, fig_features, fig_deciles
+```
+
