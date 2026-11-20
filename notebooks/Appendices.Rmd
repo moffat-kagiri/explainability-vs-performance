@@ -2,7 +2,7 @@
 title: "Appendices"
 author: "Moffat Kagiri Ngugi"
 date: "`r Sys.Date()`"
-output: html_document
+output: word_document
 ---
 
 ```{r setup, include = FALSE, echo = FALSE, message=FALSE, warning=FALSE}
@@ -138,9 +138,7 @@ themed_table <- function(df, caption = NULL, align = NULL, size = tbl_size) {
 
 ```
 
-Where does explanation instability come from? Tables and figures for the RQ3 discussion.
-Needs from the setup chunks: lab(), themed_table(), pal, scale_model(), base_theme (figures/table scripts).
-Reads only saved results. SD values are in log-frequency units; premium-equivalent = exp(SD) - 1.
+Where does explanation instability come from? Tables and figures for the RQ3 discussion. Needs from the setup chunks: lab(), themed_table(), pal, scale_model(), base_theme (figures/table scripts). Reads only saved results. SD values are in log-frequency units; premium-equivalent = exp(SD) - 1.
 
 ```{r, echo=FALSE}
 library(ggplot2)
@@ -163,18 +161,20 @@ pct      <- function(sd) 100 * (exp(sd) - 1)
 sd_pct   <- function(sd) sprintf("%.4f (%.1f%%)", sd, pct(sd))
 
 # ---- Variable check: confirm that the saved columns are what the text says they are ------------
-themed_table(
-  data.frame(
-    model = models_b,
-    floor_saved      = stab$stab_axis1$mean_sd_phi[match(models_b, stab$stab_axis1$model)],
-    floor_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$noise_phi[[m]]), c(1, 2), sd))),
-    refit_saved      = stab$stab_axis2$mean_sd_phi[match(models_b, stab$stab_axis2$model)],
-    refit_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$phi_refit[[m]]), c(1, 2), sd))),
-    pred_sd_saved      = stab$stab_axis2$pred_sd[match(models_b, stab$stab_axis2$model)],
-    pred_sd_recomputed = sapply(models_b, function(m) mean(apply(do.call(cbind, stab$fx_refit[[m]]), 1, sd)))
-    )
-) 
+check <- data.frame(
+  model = models_b,
+  floor_saved      = stab$stab_axis1$mean_sd_phi[match(models_b, stab$stab_axis1$model)],
+  floor_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$noise_phi[[m]]), c(1, 2), sd))),
+  refit_saved      = stab$stab_axis2$mean_sd_phi[match(models_b, stab$stab_axis2$model)],
+  refit_recomputed = sapply(models_b, function(m) mean(apply(arr_of(stab$phi_refit[[m]]), c(1, 2), sd))),
+  pred_sd_saved      = stab$stab_axis2$pred_sd[match(models_b, stab$stab_axis2$model)],
+  pred_sd_recomputed = sapply(models_b, function(m) mean(apply(do.call(cbind, stab$fx_refit[[m]]), 1, sd))))
 print(round(check[, -1], 4))
+stopifnot(isTRUE(all.equal(check$floor_saved, check$floor_recomputed)),
+          isTRUE(all.equal(check$refit_saved, check$refit_recomputed)),
+          isTRUE(all.equal(check$pred_sd_saved, check$pred_sd_recomputed)))
+
+themed_table(check) 
 stopifnot(isTRUE(all.equal(check$floor_saved, check$floor_recomputed)),
           isTRUE(all.equal(check$refit_saved, check$refit_recomputed)),
           isTRUE(all.equal(check$pred_sd_saved, check$pred_sd_recomputed)))
@@ -201,7 +201,6 @@ tab_sources <- themed_table(sources, align = "lrrr",
                   "(the refits use a fixed background). Root-mean-square basis, so seed and data parts add as variances."))
 tab_sources
 ```
-
 
 ```{r, echo=FALSE}
 # ---- Table 2: prediction-driven movement versus reallocation ---------------------------------------
@@ -298,4 +297,3 @@ headline_premium <- data.frame(model = models_b,
 print(headline_premium)
 # Display with: tab_sources, tab_realloc, tab_features, fig_features, fig_deciles
 ```
-
