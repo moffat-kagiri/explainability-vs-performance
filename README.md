@@ -5,20 +5,22 @@
 MSc Data Science Dissertation — University of East London (UEL-DS-7010)
 Author: Moffat Kagiri | Supervisor: Dr. Konstantinos Vrachimis
 
-> ⚠️ This is a working repository, updated as the project progresses through proposal, literature review, methodology, empirical work, and write-up. Expect structural changes.
+> ✅ This dissertation project is complete and submitted. The repository contains the completed methodology, empirical work, decision framework, and written chapters.
 
 ---
 
 ## Project Summary
 
-This project investigates the trade-off between predictive performance and explainability across three model classes commonly used in insurance risk modelling — **GLM**, **GBM**, and **Neural Networks**. Models are compared on:
+This project investigates the trade-off between predictive performance and explainability across three model classes commonly used in insurance risk modelling — **GLM**, **GBM**, and **Neural Networks** — using French Motor Third-Party Liability claim-frequency data.
+
+The analysis compares:
 
 - **Predictive performance**: Poisson deviance, calibration (predicted / observed claims), Gini coefficient, log-likelihood
 - **Explainability**: SHAP fidelity, LIME stability
 
 The findings feed into a **multi-criteria decision framework** for actuarial model selection, intended to help practitioners weigh accuracy against interpretability in a defensible, structured way.
 
-A secondary research thread examines whether **SHAP sensitivity variation across model classes constitutes measurable actuarial model risk**, connecting the XAI stability literature to model risk doctrine (model risk as data risk).
+A secondary research thread examines whether **SHAP sensitivity variation across model classes constitutes measurable actuarial model risk**, connecting the XAI stability literature to model risk doctrine.
 
 Regulatory frameworks (e.g. Solvency II, EU AI Act) are treated as **contextual scaffolding** rather than primary objects of analysis, per supervisor guidance.
 
@@ -26,26 +28,28 @@ Regulatory frameworks (e.g. Solvency II, EU AI Act) are treated as **contextual 
 
 ## Current Status
 
-🚧 **Phase 4: Empirical Work** — in progress
+🎓 **Complete — dissertation submitted**
 
 - ✅ Dataset finalised and prepared; train/test split and CV folds fixed (grouped by covariate profile)
 - ✅ GLM fitted (Poisson, log-exposure offset)
-- ✅ GBM tuned (LightGBM, grouped CV) and configuration locked before any test-set evaluation
-- 🚧 Neural network: design and tuning next
-- ⏳ Combined test-set evaluation of all three models (run once, after the ANN is fixed)
-- ⏳ SHAP / LIME analysis
+- ✅ GBM tuned (LightGBM, grouped CV) and configuration locked before test-set evaluation
+- ✅ Neural network designed, tuned, and evaluated
+- ✅ Combined test-set evaluation completed for all three model classes
+- ✅ SHAP and LIME explainability and stability analyses completed
+- ✅ Multi-criteria decision framework developed
+- ✅ Dissertation findings and write-up completed
 
-See [Roadmap](#roadmap) below for the full six-phase plan.
+See [Roadmap](#roadmap) below for the six-phase project plan.
 
 ---
 
 ## Dataset
 
-French Motor Third-Party Liability (MTPL) claim frequency data (freMTPL2freq): 677,991 policies, with claim counts, exposure, and vehicle, driver and geographic covariates. Raw data are not committed to the repository (see `.gitignore`).
+French Motor Third-Party Liability (MTPL) claim frequency data (freMTPL2freq): 677,991 policies, with claim counts, exposure, and vehicle, driver and geographic covariates. Raw data are not committed to the repository.
 
 ### Train/test split and cross-validation
 
-Many records share identical covariate values, plausibly the same policyholder observed over several exposure periods. Under a random split, 35.6% of test rows had an exact covariate-profile match in the training data, which would inflate the performance of flexible models more than that of a GLM.
+Many records share identical covariate values, plausibly the same policyholder observed over several exposure periods. Under a random split, 35.6% of test rows had an exact covariate-profile match in the training set.
 
 The split and cross-validation are therefore **grouped by covariate profile**:
 
@@ -59,20 +63,18 @@ Limitation: with no customer ID, identical covariates are only a proxy for the s
 
 ## Repository Structure
 
-*(will evolve as work progresses)*
-
 ```
 explainability-vs-performance/
 ├── proposal/           # Research proposal drafts and supporting docs
 ├── literature/         # Literature review notes, synthesis tracking, seed papers
 ├── data/               # Raw/processed data (not committed; access notes only)
-├── notebooks/          # Exploratory analysis, modelling experiments
+├── notebooks/          # Completed analysis, modelling, and dissertation chapters
 ├── src/                # Reusable code: preprocessing, modelling, SHAP/LIME pipelines
-├── framework/          # Model selection decision framework development
-└── writeup/            # Dissertation drafts by chapter
+├── framework/          # Completed model selection decision framework
+└── writeup/            # Dissertation chapters and supporting materials
 ```
 
-Key committed artefacts: `test_idx.rds` (test-set row indices) and `model_selection_locked.rds` (GBM configuration chosen from CV before test evaluation).
+Key committed artefacts include `test_idx.rds`, `model_selection_locked.rds`, `ann_selection_locked.rds`, and the final empirical results used in the dissertation.
 
 ---
 
@@ -82,11 +84,11 @@ Key committed artefacts: `test_idx.rds` (test-set row indices) and `model_select
 2. **Data Preparation** — cleaning, feature engineering, grouped train/test split and CV folds (see Dataset)
 3. **Model Development**
    - **GLM**: Poisson regression with log link and `log(Exposure)` offset
-   - **GBM**: LightGBM with Poisson objective and exposure offset (`init_score`). Deterministic grid over `num_leaves` and `min_data_in_leaf` (`max_depth = -1`, other parameters at defaults), early stopping on grouped CV folds. Selection rule fixed before test evaluation: the simplest configuration (fewest total leaves, i.e. leaves per tree × trees) within one standard error of the best CV score; the best-CV configuration is reported as a sensitivity case
-   - **Neural network**: Poisson loss with exposure offset, same split and folds, small pre-declared tuning grid
+   - **GBM**: LightGBM with Poisson objective and exposure offset (`init_score`). Deterministic grid over `num_leaves` and `min_data_in_leaf` (`max_depth = -1`, other parameters at defaults), with early stopping
+   - **Neural network**: Poisson loss with exposure offset, same split and folds, pre-declared tuning grid
 4. **Evaluation** — all three models scored once on the untouched test set (Poisson deviance, calibration)
 5. **Explainability Analysis** — SHAP fidelity and LIME stability across model classes
-6. **Framework Development** — synthesise performance + explainability metrics into a multi-criteria decision framework
+6. **Framework Development** — synthesise performance, explainability, and robustness metrics into a multi-criteria decision framework
 7. **Model Risk Thread** — assess whether SHAP sensitivity variation constitutes measurable model risk
 
 ---
@@ -95,7 +97,7 @@ Key committed artefacts: `test_idx.rds` (test-set row indices) and `model_select
 
 - Split seed: 2026. CV folds and LightGBM seed: 42 (`deterministic = TRUE`)
 - LightGBM version: 4.7.0
-- The ungrouped-fold GBM grid was kept only as a comparison to show the effect of leakage-aware CV; it is not used in model comparison
+- The ungrouped-fold GBM grid was retained only as a comparison to show the effect of leakage-aware CV; it is not used in model comparison
 
 ---
 
@@ -105,12 +107,10 @@ Key committed artefacts: `test_idx.rds` (test-set row indices) and `model_select
 |---|---|---|
 | 1 | Foundation & Proposal | ✅ Complete |
 | 2 | Literature Review | ✅ Complete |
-| 3 | Methodology & Data | ✅ Data, split and GBM tuning done |
-| 4 | Empirical Work | 🚧 In progress (ANN next) |
-| 5 | Framework Development | ⏳ Not started |
-| 6 | Writing & Submission | ⏳ Not started |
-
-Writing proceeds concurrently with each phase — the introduction chapter is written last, once findings and framing are settled.
+| 3 | Methodology & Data | ✅ Complete |
+| 4 | Empirical Work | ✅ Complete |
+| 5 | Framework Development | ✅ Complete |
+| 6 | Writing & Submission | ✅ Complete and submitted |
 
 ---
 
@@ -125,8 +125,9 @@ Literature managed in Zotero; synthesis tracked separately (Author/Year | Core A
 
 ## Notes / Changelog
 
-- **2026-07-02**: Repo initialised. Proposal work underway; literature review being prioritised to support proposal. Dataset (French Motor MTPL) under review due to access issues — may switch.
-- **2026-10-28**: Dataset confirmed (freMTPL2freq). Split and CV redone by covariate-profile group after finding 35.6% train/test profile overlap under a random split. LightGBM grid rerun on grouped folds; GBM configuration locked before test evaluation. Neural network is next.
+- **2026-11-22**: Dissertation project completed and submitted.
+- **2026-07-02**: Repo initialised. Proposal work underway; literature review prioritised to support proposal. Dataset (French Motor MTPL) under review due to access issues — may switch.
+- **2026-10-28**: Dataset confirmed (freMTPL2freq). Split and CV redone by covariate-profile group after finding 35.6% train/test profile overlap under a random split. LightGBM grid rerun on grouped folds.
 
 ---
 
